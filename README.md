@@ -117,7 +117,7 @@ db/init/002_seed.sql
   POSTGRES_HOST=db
   POSTGRES_USER=postgres
   POSTGRES_PASSWORD=postgres
-  POSTGRES_DB=vt_nlp
+  POSTGRES_DB=nlp
   ```
 
 ### Database (PostgreSQL)
@@ -132,7 +132,7 @@ db/init/002_seed.sql
   Server: db
   Username: postgres
   Password: postgres
-  Database: vt_nlp
+  Database: nlp
   ```
 
 ---
@@ -155,6 +155,6 @@ After running `docker compose up`:
 | `docker compose down` | Stop and remove containers |
 | `docker compose down -v` | Stop and remove containers + database volume |
 | `docker compose logs -f backend` | Tail backend logs |
-| `docker exec -it vt_nlp_db psql -U postgres -d vt_nlp` | Open psql shell inside DB |
+| `docker exec -it nlp_db psql -U postgres -d nlp` | Open psql shell inside DB |
 
 ---
