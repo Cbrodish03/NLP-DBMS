@@ -71,6 +71,9 @@ def convert_to_sql(classes):
 
     # sql_statements = []
     for cls in classes:
+        if not any(field.strip() for field in cls):
+            continue  # skip empty rows
+
         acad_year = normalize_academic_year(cls[0])      # like "2024-2025"
         term_label = cls[1]     # like Fall 2025
         subject_code = cls[2]
@@ -93,7 +96,7 @@ def convert_to_sql(classes):
         f = float(cls[18])
         withdraws = int(cls[19])
         graded_enrollment = int(cls[20])
-        course_id = cls[21]
+        course_id = cls[21]     # swap to CRN?
         credits = float(cls[22])
 
         # --- SUBJECT ---
@@ -148,6 +151,7 @@ def convert_to_sql(classes):
 
         # --- COURSE ---
         course_key = course_id
+        # add check for subject and course number, remove check off course_id
         if course_key not in seen["course"]:
             seen["course"].add(course_key)
             course_title_esc = sql_escape(course_title)
@@ -181,51 +185,6 @@ def convert_to_sql(classes):
             )
 
     return tables
-
-def sql_for_subject(subject_code, name):
-    """
-    Generates SQL insert statement for subject table.
-    """
-    return f"INSERT INTO subject (subject_code, name) VALUES ('{subject_code}', '{name}');"
-
-def sql_for_term(term_id, label, academic_year):
-    """
-    Generates SQL insert statement for term table.
-    """
-    return f"INSERT INTO term (term_id, label, academic_year) " \
-           f"VALUES ({term_id}, '{label}', '{academic_year}');"
-
-def sql_for_course(course_id, subject_code, course_number, title, credits, level):
-    """
-    Generates SQL insert statement for course table.
-    """
-    return f"INSERT INTO course (course_id, subject_code, course_number, title, credits, level) "\
-           f"VALUES ({course_id}, '{subject_code}', '{course_number}', '{title}', {credits}, '{level}');"
-
-def sql_for_instructor(instructor_id, name_display):
-    """
-    Generates SQL insert statement for instructor table.
-    """
-    return f"INSERT INTO instructor (instructor_id, name_display) "\
-           f"VALUES ({instructor_id}, '{name_display}');"
-
-def sql_for_section(course_id, term_id, instructor_id, credits, graded_enrollment):
-    """
-    Generates SQL insert statement for section table.
-    """
-    return f"INSERT INTO section (course_id, term_id, instructor_id, credits, graded_enrollment) "\
-           f"VALUES ({course_id}, {term_id}, {instructor_id}, {credits}, {graded_enrollment});"
-
-def sql_for_grade_distribution(section_id, gpa, a, a_minus, b_plus, b, b_minus,
-                               c_plus, c, c_minus, d_plus, d, d_minus, f,
-                               withdraws, graded_enrollment):
-    """
-    Generates SQL insert statement for grade_distribution table.
-    """
-    return f"INSERT INTO grade_distribution (section_id, gpa, a, a_minus, b_plus, b, b_minus, c_plus, "\
-           f"c, c_minus, d_plus, d, d_minus, f, withdraws, graded_enrollment) "\
-           f"VALUES ({section_id}, {gpa}, {a}, {a_minus}, {b_plus}, {b}, {b_minus}, {c_plus}, "\
-           f"{c}, {c_minus}, {d_plus}, {d}, {d_minus}, {f}, {withdraws}, {graded_enrollment});"
 
 def print_all_classes(classes):
     """
