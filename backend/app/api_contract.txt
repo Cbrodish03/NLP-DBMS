@@ -1,0 +1,446 @@
+VT DATA COMMONS – NLP QUERY API CONTRACT
+(Text version with examples)
+
+========================================
+1. OVERVIEW
+========================================
+Endpoint:
+  POST /query
+
+Purpose:
+  Accept a natural-language query about courses/sections/grades and return
+  a normalized response containing:
+    - 0..n sections
+    - Aggregated statistics
+    - Parsed intent + filters (metadata)
+    - Optional extra collections (e.g., subjects for fallback)
+
+The response shape is STABLE: expansions of the NLP / query engine will NOT
+break this contract. New fields may be added, but existing ones will not be
+removed or renamed.
+
+========================================
+2. REQUEST FORMAT
+========================================
+HTTP:
+  POST /query
+  Content-Type: application/json
+
+Body:
+  {
+    "query": "<free text>"
+  }
+
+Examples:
+  1) Simple course lookup
+     {
+       "query": "cs 2104"
+     }
+
+  2) Course + instructor
+     {
+       "query": "Show me CS 4824 with Wyatt"
+     }
+
+  3) Filter-style query (future capability)
+     {
+       "query": "Show me all 1000 level classes with GPA above 3.5"
+     }
+
+========================================
+3. BASE RESPONSE FORMAT (SUCCESS)
+========================================
+Every successful response has the following top-level shape:
+
+  {
+    "ok": true,
+    "meta": { ... },
+    "sections": [ ... ],
+    "aggregates": { ... },
+    "subjects": [ ... ]   // optional, only for some intents
+  }
+
+Fields:
+  ok           : boolean, true on success
+  meta         : object, always present (intent, filters, debug info)
+  sections     : array of section objects, may be empty
+  aggregates   : object, always present (summary stats)
+  subjects     : optional array, only used for certain intents like fallback
+
+========================================
+4. META OBJECT
+========================================
+Structure:
+
+  "meta": {
+    "query": "<original query string>",
+    "intent": "<intent label>",
+    "filters": {
+      "subjects": [string],
+      "course_numbers": [string],
+      "instructors": [string],
+      "terms": [string],
+      "course_number_min": number | null,
+      "course_number_max": number | null,
+      "gpa_min": number | null,
+      "gpa_max": number | null
+    },
+    "debug": {
+      ... implementation-specific debugging info ...
+    }
+  }
+
+Common intent values (current & planned):
+  - "course_lookup"
+      Detected subject + course number (e.g., "CS 2104").
+
+  - "browse_subjects"
+      Fallback intent when no specific course/filters are parsed.
+      Typically returns a list of subjects and no sections.
+
+  - "section_filter" (future)
+      NLP-based filtering on GPA, level, etc.
+      Example query: "All 1000 level classes with GPA above 3.5".
+
+  - "ranking_query" (future)
+      Top-k / ranking style questions.
+      Example query: "Easiest CS electives".
+
+Example (course lookup):
+
+  "meta": {
+    "query": "cs 2104",
+    "intent": "course_lookup",
+    "filters": {
+      "subjects": ["CS"],
+      "course_numbers": ["2104"],
+      "instructors": [],
+      "terms": [],
+      "course_number_min": null,
+      "course_number_max": null,
+      "gpa_min": null,
+      "gpa_max": null
+    },
+    "debug": {
+      "tokens": ["cs", "2104"],
+      "regex_match": {
+        "subject_code": "CS",
+        "course_number": "2104"
+      }
+    }
+  }
+
+Example (future filter query):
+
+  "meta": {
+    "query": "show me all the 1000 level classes that have a gpa above 3.5",
+    "intent": "section_filter",
+    "filters": {
+      "subjects": [],
+      "course_numbers": [],
+      "instructors": [],
+      "terms": [],
+      "course_number_min": 1000,
+      "course_number_max": 1999,
+      "gpa_min": 3.5,
+      "gpa_max": null
+    },
+    "debug": {
+      "tokens": ["show", "me", "all", "the", "1000", "level", "classes", "that", "have", "a", "gpa", "above", "3.5"],
+      "parsed_constraints": {
+        "level_range": "1000-level",
+        "gpa_min": 3.5
+      }
+    }
+  }
+
+========================================
+5. SECTIONS ARRAY (PRIMARY DATA)
+========================================
+The "sections" array is the main content of the response. It is always present
+on success, though it may be empty.
+
+Each element has the following structure:
+
+  {
+    "section_id": number,
+    "course_id": number,
+    "term_id": number,
+    "instructor_id": number,
+
+    "credits": number | null,              // section-level credits
+    "graded_enrollment": number | null,    // section-level graded enrollment
+
+    "course": {
+      "course_id": number | null,
+      "subject_code": string,
+      "subject_name": string | null,
+      "course_number": string,
+      "title": string | null,
+      "credits": number | null,           // course-level credits
+      "level": string | null              // e.g., "UG", "GR"
+    },
+
+    "term": {
+      "term_id": number,
+      "label": string,                    // e.g., "Fall 2023"
+      "academic_year": string | null      // e.g., "2023-24"
+    },
+
+    "instructor": {
+      "instructor_id": number,
+      "name_display": string              // e.g., "Wyatt"
+    },
+
+    "grades": {
+      "gpa": number | null,
+      "graded_enrollment": number,
+      "withdraws": number,
+      "breakdown": {
+        "A": number,
+        "A-": number,
+        "B+": number,
+        "B": number,
+        "B-": number,
+        "C+": number,
+        "C": number,
+        "C-": number,
+        "D+": number,
+        "D": number,
+        "D-": number,
+        "F": number
+      }
+    }
+  }
+
+Example (single section):
+
+  "sections": [
+    {
+      "section_id": 123,
+      "course_id": 42,
+      "term_id": 55,
+      "instructor_id": 7,
+
+      "credits": 3,
+      "graded_enrollment": 120,
+
+      "course": {
+        "course_id": 42,
+        "subject_code": "CS",
+        "subject_name": "Computer Science",
+        "course_number": "2104",
+        "title": "Intro to Software Design",
+        "credits": 3,
+        "level": "UG"
+      },
+
+      "term": {
+        "term_id": 55,
+        "label": "Fall 2023",
+        "academic_year": "2023-24"
+      },
+
+      "instructor": {
+        "instructor_id": 7,
+        "name_display": "Wyatt"
+      },
+
+      "grades": {
+        "gpa": 3.2,
+        "graded_enrollment": 120,
+        "withdraws": 5,
+        "breakdown": {
+          "A": 30,
+          "A-": 20,
+          "B+": 25,
+          "B": 15,
+          "B-": 10,
+          "C+": 5,
+          "C": 5,
+          "C-": 3,
+          "D+": 2,
+          "D": 0,
+          "D-": 0,
+          "F": 5
+        }
+      }
+    }
+  ]
+
+Example (no matching sections, but still success):
+
+  {
+    "ok": true,
+    "meta": {
+      "query": "cs 9999",
+      "intent": "course_lookup",
+      "filters": { ... },
+      "debug": { ... }
+    },
+    "sections": [],
+    "aggregates": {
+      "section_count": 0,
+      "avg_gpa": null,
+      "total_graded_enrollment": 0
+    }
+  }
+
+========================================
+6. AGGREGATES OBJECT
+========================================
+The "aggregates" object summarizes the sections returned.
+
+Structure:
+
+  "aggregates": {
+    "section_count": number,
+    "avg_gpa": number | null,
+    "total_graded_enrollment": number
+  }
+
+Definitions:
+  section_count             : number of elements in "sections"
+  avg_gpa                   : average GPA across sections that have a non-null GPA
+  total_graded_enrollment   : sum of grades.graded_enrollment across all sections
+
+Example:
+
+  "aggregates": {
+    "section_count": 6,
+    "avg_gpa": 3.14,
+    "total_graded_enrollment": 742
+  }
+
+For queries like "show me all the 1000 level classes with gpa above 3.5",
+the "aggregates" object will reflect only the filtered sections that are returned.
+
+========================================
+7. SUBJECTS ARRAY (OPTIONAL)
+========================================
+The "subjects" array is only present for some intents, such as "browse_subjects",
+where we fall back to showing available subjects instead of specific sections.
+
+Structure:
+
+  "subjects": [
+    {
+      "subject_code": "CS",
+      "name": "Computer Science"
+    },
+    {
+      "subject_code": "MATH",
+      "name": "Mathematics"
+    }
+  ]
+
+Typical scenario:
+  - The query cannot be parsed into a clear course or filter.
+  - Intent is set to "browse_subjects".
+  - sections = [].
+  - subjects[] is populated with all known subjects.
+
+Example:
+
+  {
+    "ok": true,
+    "meta": {
+      "query": "just show me what's available",
+      "intent": "browse_subjects",
+      "filters": { ... empty ... },
+      "debug": { ... }
+    },
+    "sections": [],
+    "aggregates": {
+      "section_count": 0,
+      "avg_gpa": null,
+      "total_graded_enrollment": 0
+    },
+    "subjects": [
+      { "subject_code": "CS", "name": "Computer Science" },
+      { "subject_code": "MATH", "name": "Mathematics" }
+    ]
+  }
+
+========================================
+8. ERROR RESPONSE FORMAT
+========================================
+On error (e.g., DB failure), the top-level shape is similar but "ok" is false.
+
+Structure:
+
+  {
+    "ok": false,
+    "error": "Human-readable error message",
+    "meta": { ... },
+    "sections": [],
+    "aggregates": {
+      "section_count": 0,
+      "avg_gpa": null,
+      "total_graded_enrollment": 0
+    },
+    "subjects": null
+  }
+
+Notes:
+  - meta is still present (query, intent, filters, debug).
+  - sections is an empty array.
+  - aggregates is a valid object with zeroed / null values.
+  - subjects may be null or omitted.
+
+Example:
+
+  {
+    "ok": false,
+    "error": "Database connection failed",
+    "meta": {
+      "query": "cs 2104",
+      "intent": "course_lookup",
+      "filters": {
+        "subjects": ["CS"],
+        "course_numbers": ["2104"],
+        "instructors": [],
+        "terms": [],
+        "course_number_min": null,
+        "course_number_max": null,
+        "gpa_min": null,
+        "gpa_max": null
+      },
+      "debug": {
+        "tokens": ["cs", "2104"]
+      }
+    },
+    "sections": [],
+    "aggregates": {
+      "section_count": 0,
+      "avg_gpa": null,
+      "total_graded_enrollment": 0
+    },
+    "subjects": null
+  }
+
+========================================
+9. FRONTEND STABILITY GUARANTEES
+========================================
+The following invariants hold for ALL successful responses (ok = true):
+
+  - "meta" is ALWAYS present.
+  - "sections" is ALWAYS present (may be empty).
+  - "aggregates" is ALWAYS present.
+  - "subjects" MAY be present, but is optional.
+
+The frontend can **always** safely rely on:
+  - result.ok
+  - result.meta.intent
+  - result.sections
+  - result.aggregates
+
+NLP / backend expansions (e.g., instructor filtering, GPA ranges, ranking queries)
+will ONLY add fields (such as new filters or optional "rankings" objects).
+They will NOT:
+  - rename existing fields,
+  - remove existing fields,
+  - change fundamental types of existing fields.
+
+This means frontend code written against this contract will continue to work as
+we add more query capabilities.
