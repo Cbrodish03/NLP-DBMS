@@ -22,27 +22,52 @@ JOIN instructor i ON s.instructor_id = i.instructor_id;
 
 CREATE OR REPLACE VIEW v_grade_distribution_full AS
 SELECT
-    gd.section_id,
+    -- Section-level info
+    s.section_id,
+    s.course_id,
+    s.term_id,
+    s.instructor_id,
+    s.credits           AS section_credits,
+    s.graded_enrollment AS section_graded_enrollment,
+
+    -- Course + subject info
     c.subject_code,
+    subj.name           AS subject_name,
     c.course_number,
-    c.title AS course_title,
-    t.term_id,
-    t.label AS term_label,
-    i.instructor_id,
-    i.name_display AS instructor,
-    s.credits,
+    c.title             AS course_title,
+    c.credits           AS course_credits,
+    c.level             AS course_level,
+
+    -- Term info
+    t.label             AS term_label,
+    t.academic_year,
+
+    -- Instructor info
+    i.name_display      AS instructor,
+
+    -- Grade distribution
     gd.gpa,
-    gd.a, gd.a_minus, gd.b_plus, gd.b, gd.b_minus,
-    gd.c_plus, gd.c, gd.c_minus,
-    gd.d_plus, gd.d, gd.d_minus,
+    gd.a,
+    gd.a_minus,
+    gd.b_plus,
+    gd.b,
+    gd.b_minus,
+    gd.c_plus,
+    gd.c,
+    gd.c_minus,
+    gd.d_plus,
+    gd.d,
+    gd.d_minus,
     gd.f,
     gd.withdraws,
     gd.graded_enrollment
-FROM grade_distribution gd
-JOIN section s ON gd.section_id = s.section_id
-JOIN course  c ON s.course_id = c.course_id
-JOIN instructor i ON s.instructor_id = i.instructor_id
-JOIN term t ON s.term_id = t.term_id;
+FROM section s
+JOIN course            c    ON s.course_id     = c.course_id
+JOIN subject           subj ON c.subject_code  = subj.subject_code
+JOIN term              t    ON s.term_id       = t.term_id
+JOIN instructor        i    ON s.instructor_id = i.instructor_id
+JOIN grade_distribution gd  ON s.section_id    = gd.section_id;
+
 
 CREATE OR REPLACE VIEW v_course_summary AS
 SELECT
