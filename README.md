@@ -104,6 +104,30 @@ db/init/002_seed.sql
 
 ---
 
+## DB Loader (CSV -> SQL Seed Generator)
+
+A utility script located at:
+
+```
+db/tools/db_loader.py
+```
+
+### Usage
+
+```bash
+python3 db/tools/db_loader.py --in input.csv --out output.sql
+```
+
+If `--out` is omitted, a `.sql` file with the same name as the CSV is produced.
+
+The loader:
+- Deduplicates subjects, courses, instructors
+- Uses CRN as the section ID
+- Converts percentage-based grades into integer counts that sum to `graded_enrollment`
+- Emits conflict-safe `INSERT` statements
+
+---
+
 ## Development Notes
 
 ### Frontend (Vite + React)
