@@ -218,7 +218,7 @@ def convert_to_sql(classes):
                 f"{credits if credits is not None else 'NULL'}, {graded_enrollment})"
             )
 
-        # --- GRADE DISTRIBUTION (percent → counts) ---
+        # --- GRADE DISTRIBUTION (percent -> counts) ---
         if section_id not in seen_grade_dist:
             seen_grade_dist.add(section_id)
 
@@ -385,5 +385,5 @@ if __name__ == "__main__":
     print(f"[+] Writing SQL to: {output_path}")
     write_sql_to_file(output_path, sql_groups)
 
-    print("[✓] Completed successfully.")
+    print("[:)] Completed successfully.")
 
