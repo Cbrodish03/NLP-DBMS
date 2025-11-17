@@ -33,7 +33,7 @@ INSERT INTO grade_distribution (
   withdraws, graded_enrollment
 )
 VALUES
-  (1, 32,   -- 3.2 GPA as 32
+  (1, 3.2,   -- 3.2 GPA as 32
    30, 10, 15, 20, 5, 5, 5, 3, 2, 1, 1, 4,
    5, 100)
 ON CONFLICT DO NOTHING;

@@ -93,7 +93,7 @@ CREATE INDEX idx_section_instructor_id ON section(instructor_id);
 -- =========================
 CREATE TABLE grade_distribution (
     section_id        INT PRIMARY KEY,       -- PK & FK, NOT NULL
-    gpa               INT NOT NULL,          -- overall GPA for this section
+    gpa               DECIMAL(10,2) NOT NULL,          -- overall GPA for this section
 
     a                 INT NOT NULL DEFAULT 0,
     a_minus           INT NOT NULL DEFAULT 0,
