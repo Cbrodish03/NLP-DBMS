@@ -199,7 +199,12 @@ def query_endpoint(req: QueryRequest):
 
     meta = QueryMeta(
         query=req.query,
+<<<<<<< Updated upstream
         intent=intent,
+=======
+        confidence=plan.confidence,
+        intent=plan.intent,
+>>>>>>> Stashed changes
         filters=filters,
         debug=debug,
     )
