@@ -1,6 +1,6 @@
 # schemas.py
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
@@ -8,20 +8,26 @@ class QueryRequest(BaseModel):
 
 
 class QueryFilters(BaseModel):
-    subjects: List[str] = []
-    course_numbers: List[str] = []
-    instructors: List[str] = []
-    terms: List[str] = []
+    subjects: List[str] = Field(default_factory=list)
+    course_numbers: List[str] = Field(default_factory=list)
+    instructors: List[str] = Field(default_factory=list)
+    terms: List[str] = Field(default_factory=list)
+    course_levels: List[str] = Field(default_factory=list)
 
     course_number_min: Optional[int] = None
     course_number_max: Optional[int] = None
     gpa_min: Optional[float] = None
     gpa_max: Optional[float] = None
+    credits_min: Optional[int] = None
+    credits_max: Optional[int] = None
+    enrollment_min: Optional[int] = None
+    enrollment_max: Optional[int] = None
 
 
 class QueryMeta(BaseModel):
     query: str
     intent: str
+    confidence: float
     filters: QueryFilters
     debug: Dict[str, Any]
 
@@ -84,7 +90,7 @@ class SubjectInfo(BaseModel):
 class QueryResponse(BaseModel):
     ok: bool
     meta: QueryMeta
-    sections: List[SectionInfo] = []
+    sections: List[SectionInfo] = Field(default_factory=list)
     aggregates: Aggregates
     subjects: Optional[List[SubjectInfo]] = None
     error: Optional[str] = None
