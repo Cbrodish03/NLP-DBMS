@@ -1,5 +1,5 @@
-# db.py
 import os
+
 import psycopg2
 
 

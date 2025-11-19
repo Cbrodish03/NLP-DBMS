@@ -82,37 +82,50 @@ function App() {
       );
     }
 
-    // For now, show the first section as the primary one
-    const s = sections[0];
-    const gpa = s.grades.gpa != null ? s.grades.gpa.toFixed(2) : "N/A";
-
     return (
       <div className="card">
-        <h2>
-          {s.course.subject_code} {s.course.course_number} —{" "}
-          {s.course.title || "(no title)"}
-        </h2>
+        <h2>Sections ({sections.length})</h2>
 
-        <p>
-          Term: <strong>{s.term.label}</strong>
-        </p>
-        <p>
-          Instructor: <strong>{s.instructor.name_display}</strong>
-        </p>
-        <p>
-          GPA: <strong>{gpa}</strong> (graded enrollment{" "}
-          {s.grades.graded_enrollment})
-        </p>
+        {sections.map((s) => {
+          const grades = s.grades || {};
+          const gpa =
+            grades.gpa != null && !Number.isNaN(grades.gpa)
+              ? Number(grades.gpa).toFixed(2)
+              : "N/A";
 
-        <details>
-          <summary>Full grade breakdown</summary>
-          <pre>{JSON.stringify(s.grades.breakdown, null, 2)}</pre>
-        </details>
-
-        <details>
-          <summary>All sections</summary>
-          <pre>{JSON.stringify(sections, null, 2)}</pre>
-        </details>
+          return (
+            <div key={s.section_id} className="section-card">
+              <h3>
+                {s.course.subject_code} {s.course.course_number} —{" "}
+                {s.course.title || "(no title)"}
+              </h3>
+              <p>
+                <strong>Section ID:</strong> {s.section_id} |{" "}
+                <strong>Course ID:</strong> {s.course_id}
+              </p>
+              <p>
+                <strong>Term:</strong> {s.term.label} ({s.term.academic_year})
+              </p>
+              <p>
+                <strong>Instructor:</strong> {s.instructor.name_display}
+              </p>
+              <p>
+                <strong>Level:</strong> {s.course.level || "N/A"} |{" "}
+                <strong>Credits:</strong> {s.course.credits ?? "N/A"}
+              </p>
+              <p>
+                <strong>GPA:</strong> {gpa} |{" "}
+                <strong>Graded enrollment:</strong>{" "}
+                {grades.graded_enrollment ?? "N/A"} |{" "}
+                <strong>Withdraws:</strong> {grades.withdraws ?? "N/A"}
+              </p>
+              <details>
+                <summary>Grade breakdown</summary>
+                <pre>{JSON.stringify(grades.breakdown || {}, null, 2)}</pre>
+              </details>
+            </div>
+          );
+        })}
 
         <details>
           <summary>Aggregates</summary>
