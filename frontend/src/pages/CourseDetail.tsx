@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, BarChart3, GraduationCap, Users, User, CalendarRange, BookOpen } from 'lucide-react';
-import type { QueryResult } from '../lib/queryProcessor';
+import type { QueryResult } from '../utils/queryProcessor';
 
 type GradeKey = keyof QueryResult['grade_distribution'];
 

@@ -8,7 +8,7 @@ import {
   type QueryFilters,
   type QueryMeta,
   type QueryResult,
-} from '../lib/queryProcessor';
+} from '../utils/queryProcessor';
 
 type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'b_or_above_percentage' | 'gpa';
 type SortDirection = 'asc' | 'desc';

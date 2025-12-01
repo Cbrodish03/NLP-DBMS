@@ -1,6 +1,6 @@
 import { TrendingUp } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import type { QueryResult } from '../lib/queryProcessor';
+import type { QueryResult } from '../utils/queryProcessor';
 
 type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'b_or_above_percentage' | 'gpa';
 
