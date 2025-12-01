@@ -12,6 +12,7 @@ from .schemas import (
     InstructorInfo,
     Aggregates,
     SubjectInfo,
+    QueryFilters,
 )
 
 SECTION_SELECT = """
@@ -180,11 +181,12 @@ def row_to_section(row: Any) -> SectionInfo:
     )
 
 
-def filter_existing_instructors(cur, instructors: List[str]) -> List[str]:
-    """Return only instructor names that exist in the DB (ILIKE match)."""
+def filter_existing_instructors(cur, instructors: List[str]) -> Tuple[List[str], List[str]]:
+    """Return only instructor names that exist in the DB (ILIKE match), plus dropped ones."""
     if not instructors:
-        return []
+        return [], []
     valid: List[str] = []
+    dropped: List[str] = []
     for name in instructors:
         cur.execute(
             "SELECT 1 FROM instructor WHERE name_display ILIKE %s LIMIT 1;",
@@ -192,24 +194,45 @@ def filter_existing_instructors(cur, instructors: List[str]) -> List[str]:
         )
         if cur.fetchone():
             valid.append(name)
-    return valid
+        else:
+            dropped.append(name)
+    return valid, dropped
 
 
-def filter_existing_subjects(cur, subjects: List[str]) -> List[str]:
-    """Return only subject codes that exist in the DB."""
+def filter_existing_subjects(cur, subjects: List[str]) -> Tuple[List[str], List[str]]:
+    """Return only subject codes that exist in the DB (and capture drops)."""
     if not subjects:
-        return []
+        return [], []
     valid: List[str] = []
+    dropped: List[str] = []
     for code in subjects:
         cur.execute("SELECT 1 FROM subject WHERE subject_code = %s LIMIT 1;", (code,))
         if cur.fetchone():
             valid.append(code)
-    return valid
+        else:
+            dropped.append(code)
+    return valid, dropped
+
+
+def filter_existing_titles(cur, titles: List[str]) -> Tuple[List[str], List[str]]:
+    """Return only course titles that exist in the DB (ILIKE match), plus dropped ones."""
+    if not titles:
+        return [], []
+    valid: List[str] = []
+    dropped: List[str] = []
+    for title in titles:
+        cur.execute("SELECT 1 FROM course WHERE title ILIKE %s LIMIT 1;", (f"%{title}%",))
+        if cur.fetchone():
+            valid.append(title)
+        else:
+            dropped.append(title)
+    return valid, dropped
 
 
 def build_where_and_params(pf) -> Tuple[str, List[Any]]:
     clauses: List[str] = []
     params: List[Any] = []
+    enrollment_col = "COALESCE(s.section_graded_enrollment, s.graded_enrollment)"
     if pf.subjects:
         clauses.append("s.subject_code = ANY(%s)")
         params.append(pf.subjects)
@@ -226,12 +249,21 @@ def build_where_and_params(pf) -> Tuple[str, List[Any]]:
     if getattr(pf, "course_levels", None):
         clauses.append("s.course_level = ANY(%s)")
         params.append(pf.course_levels)
+    if getattr(pf, "course_title_contains", None):
+        clauses.append("s.course_title ILIKE ALL(%s)")
+        params.append([f"%{t}%" for t in pf.course_title_contains])
     if pf.instructors:
         clauses.append("s.instructor ILIKE ANY(%s)")
         params.append([f"%{i}%" for i in pf.instructors])
+    if getattr(pf, "exclude_instructors", None):
+        clauses.append("NOT (s.instructor ILIKE ANY(%s))")
+        params.append([f"%{i}%" for i in pf.exclude_instructors])
     if pf.terms:
         clauses.append("s.term_label = ANY(%s)")
         params.append(pf.terms)
+    if getattr(pf, "exclude_terms", None):
+        clauses.append("NOT (s.term_label = ANY(%s))")
+        params.append(pf.exclude_terms)
     if pf.gpa_min is not None:
         clauses.append("s.gpa >= %s")
         params.append(pf.gpa_min)
@@ -245,17 +277,112 @@ def build_where_and_params(pf) -> Tuple[str, List[Any]]:
         clauses.append("COALESCE(s.section_credits, s.course_credits) <= %s")
         params.append(pf.credits_max)
     if getattr(pf, "enrollment_min", None) is not None:
-        clauses.append("COALESCE(s.section_graded_enrollment, s.graded_enrollment) >= %s")
+        clauses.append(f"{enrollment_col} >= %s")
         params.append(pf.enrollment_min)
     if getattr(pf, "enrollment_max", None) is not None:
-        clauses.append("COALESCE(s.section_graded_enrollment, s.graded_enrollment) <= %s")
+        clauses.append(f"{enrollment_col} <= %s")
         params.append(pf.enrollment_max)
+    if getattr(pf, "grade_min", None):
+        grade_map = {
+            "A": "s.a",
+            "A-": "s.a_minus",
+            "B+": "s.b_plus",
+            "B": "s.b",
+            "B-": "s.b_minus",
+            "C+": "s.c_plus",
+            "C": "s.c",
+            "C-": "s.c_minus",
+            "D+": "s.d_plus",
+            "D": "s.d",
+            "D-": "s.d_minus",
+            "F": "s.f",
+        }
+        for grade, threshold in pf.grade_min.items():
+            col = grade_map.get(grade.upper())
+            if col is None:
+                continue
+            clauses.append(f"{col} >= %s")
+            params.append(threshold)
+    if getattr(pf, "grade_max", None):
+        grade_map = {
+            "A": "s.a",
+            "A-": "s.a_minus",
+            "B+": "s.b_plus",
+            "B": "s.b",
+            "B-": "s.b_minus",
+            "C+": "s.c_plus",
+            "C": "s.c",
+            "C-": "s.c_minus",
+            "D+": "s.d_plus",
+            "D": "s.d",
+            "D-": "s.d_minus",
+            "F": "s.f",
+        }
+        for grade, threshold in pf.grade_max.items():
+            col = grade_map.get(grade.upper())
+            if col is None:
+                continue
+            clauses.append(f"{col} <= %s")
+            params.append(threshold)
+    if getattr(pf, "grade_min_percent", None):
+        grade_map = {
+            "A": "s.a",
+            "A-": "s.a_minus",
+            "B+": "s.b_plus",
+            "B": "s.b",
+            "B-": "s.b_minus",
+            "C+": "s.c_plus",
+            "C": "s.c",
+            "C-": "s.c_minus",
+            "D+": "s.d_plus",
+            "D": "s.d",
+            "D-": "s.d_minus",
+            "F": "s.f",
+        }
+        for grade, pct in pf.grade_min_percent.items():
+            col = grade_map.get(grade.upper())
+            if col is None:
+                continue
+            clauses.append(f"({col}::float) >= (%s / 100.0) * NULLIF({enrollment_col}, 0)")
+            params.append(pct)
+    if getattr(pf, "b_or_above_percent_min", None) is not None:
+        b_cols = [
+            "COALESCE(s.a,0)",
+            "COALESCE(s.a_minus,0)",
+            "COALESCE(s.b_plus,0)",
+            "COALESCE(s.b,0)",
+            "COALESCE(s.b_minus,0)",
+        ]
+        numerator = " + ".join(b_cols)
+        clauses.append(f"(({numerator})::float) >= (%s / 100.0) * NULLIF({enrollment_col}, 0)")
+        params.append(pf.b_or_above_percent_min)
+    if getattr(pf, "grade_compare", None):
+        grade_map = {
+            "A": "s.a",
+            "A-": "s.a_minus",
+            "B+": "s.b_plus",
+            "B": "s.b",
+            "B-": "s.b_minus",
+            "C+": "s.c_plus",
+            "C": "s.c",
+            "C-": "s.c_minus",
+            "D+": "s.d_plus",
+            "D": "s.d",
+            "D-": "s.d_minus",
+            "F": "s.f",
+        }
+        for comp in pf.grade_compare:
+            left = grade_map.get(comp.get("left", "").upper())
+            right = grade_map.get(comp.get("right", "").upper())
+            op = comp.get("op")
+            if left and right and op in {">", "<", ">=", "<="}:
+                clauses.append(f"{left} {op} {right}")
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where_sql, params
 
 
-def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[SubjectInfo]], Aggregates]:
+def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[SubjectInfo]], Aggregates, QueryFilters]:
     """
     Execute a QueryPlan against the database.
 
@@ -269,16 +396,56 @@ def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[Subj
 
     sections: List[SectionInfo] = []
     subjects: Optional[List[SubjectInfo]] = None
+    normalized_filters = QueryFilters(**plan.filters.dict())
 
     try:
         if plan.intent == "course_lookup":
             pf = plan.filters.copy(deep=True)
-            pf.subjects = filter_existing_subjects(cur, pf.subjects)
-            pf.instructors = filter_existing_instructors(cur, pf.instructors)
+            pf.subjects, dropped_subjects = filter_existing_subjects(cur, pf.subjects)
+            pf.instructors, dropped_instructors = filter_existing_instructors(cur, pf.instructors)
+            excl_instructors_valid, dropped_excl_instructors = filter_existing_instructors(
+                cur, getattr(pf, "exclude_instructors", [])
+            )
+            pf.exclude_instructors = excl_instructors_valid
+            pf.course_title_contains, dropped_titles = filter_existing_titles(cur, getattr(pf, "course_title_contains", []))
+            # Resolve relative term hints (e.g., "last spring") to the latest matching term label.
+            rel = plan.debug.get("relative_term") if isinstance(plan.debug, dict) else None
+            if rel and rel.get("season") and not pf.terms:
+                season = rel["season"]
+                cur.execute(
+                    "SELECT label FROM term WHERE label ILIKE %s ORDER BY term_id DESC LIMIT 1;",
+                    (f"{season} %",),
+                )
+                row = cur.fetchone()
+                if row:
+                    pf.terms = [row[0]]
+                    _ = plan.debug.setdefault("relative_term", {})
+                    plan.debug["relative_term"]["resolved"] = row[0]
+            # If exclude_terms overlaps with terms, prefer exclusion.
+            if getattr(pf, "exclude_terms", None):
+                if pf.terms:
+                    filtered_out_terms = pf.terms.copy()
+                    pf.terms = []
+                    plan.debug.setdefault("filtered_out", {}).setdefault("terms", []).extend(filtered_out_terms)
+                else:
+                    plan.debug.setdefault("filtered_out", {}).setdefault("terms", []).extend(pf.exclude_terms)
+            if not pf.subjects:
+                pf.course_numbers = []
+            if dropped_subjects or dropped_instructors or dropped_excl_instructors:
+                filtered_out = plan.debug.setdefault("filtered_out", {})
+                if dropped_subjects:
+                    filtered_out["subjects"] = dropped_subjects
+                if dropped_instructors:
+                    filtered_out["instructors"] = dropped_instructors
+                if dropped_excl_instructors:
+                    filtered_out["exclude_instructors"] = dropped_excl_instructors
+                if dropped_titles:
+                    filtered_out["course_title_contains"] = dropped_titles
+            normalized_filters = QueryFilters(**pf.dict())
 
             if not pf.subjects or not pf.course_numbers:
                 aggregates = compute_aggregates(sections)
-                return sections, subjects, aggregates
+                return sections, subjects, aggregates, normalized_filters
 
             # Anchored match for a specific subject+course, using simple equality to avoid type/array sensitivity.
             clauses = [
@@ -331,12 +498,49 @@ def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[Subj
 
         elif plan.intent == "section_filter":
             pf = plan.filters.copy(deep=True)
-            pf.subjects = filter_existing_subjects(cur, pf.subjects)
-            pf.instructors = filter_existing_instructors(cur, pf.instructors)
+            pf.subjects, dropped_subjects = filter_existing_subjects(cur, pf.subjects)
+            pf.instructors, dropped_instructors = filter_existing_instructors(cur, pf.instructors)
+            excl_instructors_valid, dropped_excl_instructors = filter_existing_instructors(
+                cur, getattr(pf, "exclude_instructors", [])
+            )
+            pf.exclude_instructors = excl_instructors_valid
+            pf.course_title_contains, dropped_titles = filter_existing_titles(cur, getattr(pf, "course_title_contains", []))
+            rel = plan.debug.get("relative_term") if isinstance(plan.debug, dict) else None
+            if rel and rel.get("season") and not pf.terms:
+                season = rel["season"]
+                cur.execute(
+                    "SELECT label FROM term WHERE label ILIKE %s ORDER BY term_id DESC LIMIT 1;",
+                    (f"{season} %",),
+                )
+                row = cur.fetchone()
+                if row:
+                    pf.terms = [row[0]]
+                    _ = plan.debug.setdefault("relative_term", {})
+                    plan.debug["relative_term"]["resolved"] = row[0]
+            if getattr(pf, "exclude_terms", None):
+                if pf.terms:
+                    filtered_out_terms = pf.terms.copy()
+                    pf.terms = []
+                    plan.debug.setdefault("filtered_out", {}).setdefault("terms", []).extend(filtered_out_terms)
+                else:
+                    plan.debug.setdefault("filtered_out", {}).setdefault("terms", []).extend(pf.exclude_terms)
+            if not pf.subjects:
+                pf.course_numbers = []
+            if dropped_subjects or dropped_instructors or dropped_excl_instructors or dropped_titles:
+                filtered_out = plan.debug.setdefault("filtered_out", {})
+                if dropped_subjects:
+                    filtered_out["subjects"] = dropped_subjects
+                if dropped_instructors:
+                    filtered_out["instructors"] = dropped_instructors
+                if dropped_excl_instructors:
+                    filtered_out["exclude_instructors"] = dropped_excl_instructors
+                if dropped_titles:
+                    filtered_out["course_title_contains"] = dropped_titles
+            normalized_filters = QueryFilters(**pf.dict())
             where_sql, params = build_where_and_params(pf)
             if not where_sql:
                 aggregates = compute_aggregates(sections)
-                return sections, subjects, aggregates
+                return sections, subjects, aggregates, normalized_filters
 
             order_clause = "ORDER BY s.term_id DESC, s.section_id"
             if plan.sort_by:
@@ -364,7 +568,8 @@ def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[Subj
         # Future: handle "ranking_query" here
 
         aggregates = compute_aggregates(sections)
-        return sections, subjects, aggregates
+        normalized_filters = QueryFilters(**pf.dict())
+        return sections, subjects, aggregates, normalized_filters
 
     finally:
         cur.close()

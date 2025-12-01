@@ -1,0 +1,460 @@
+import { useEffect, useMemo, useState } from 'react';
+import { BookOpen, Filter, Info, RefreshCw, Bug, Clipboard } from 'lucide-react';
+import QueryInput from '../components/QueryInput';
+import ResultsTable from '../components/ResultsTable';
+import {
+  processQuery,
+  type ProcessedQueryResponse,
+  type QueryFilters,
+  type QueryMeta,
+  type QueryResult,
+} from '../lib/queryProcessor';
+
+type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'b_or_above_percentage' | 'gpa';
+type SortDirection = 'asc' | 'desc';
+
+const CACHE_KEY = 'vt_last_query_state';
+
+export default function HomePage() {
+  const [results, setResults] = useState<QueryResult[]>([]);
+  const [filters, setFilters] = useState<QueryFilters | null>(null);
+  const [meta, setMeta] = useState<QueryMeta | null>(null);
+  const [lastQuery, setLastQuery] = useState<string>('');
+  const [sortField, setSortField] = useState<SortField>('b_or_above_percentage');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleSearch = async (query: string) => {
+    setIsLoading(true);
+    setError(null);
+    setHasSearched(true);
+    setPage(1);
+    setCopied(false);
+    setLastQuery(query);
+
+    try {
+      const data: ProcessedQueryResponse = await processQuery(query);
+      setResults(data.results);
+      setFilters(data.meta?.filters ?? null);
+      setMeta(data.meta ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+      setResults([]);
+      setFilters(null);
+      setMeta(null);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const chips = useMemo(() => {
+    if (!filters) return [];
+    const chipList: { label: string }[] = [];
+    filters.subjects?.forEach((s) => chipList.push({ label: `Subject: ${s}` }));
+    filters.course_numbers?.forEach((c) => chipList.push({ label: `Course: ${c}` }));
+    if (filters.course_number_min != null || filters.course_number_max != null) {
+      chipList.push({
+        label: `Course range: ${filters.course_number_min ?? 'Any'}–${filters.course_number_max ?? 'Any'}`,
+      });
+    }
+    if (filters.gpa_min != null) chipList.push({ label: `GPA ≥ ${filters.gpa_min}` });
+    if (filters.gpa_max != null) chipList.push({ label: `GPA ≤ ${filters.gpa_max}` });
+    filters.instructors?.forEach((name) => chipList.push({ label: `Instructor: ${name}` }));
+    filters.terms?.forEach((t) => chipList.push({ label: `Term: ${t}` }));
+    if (filters.grade_min) {
+      Object.entries(filters.grade_min).forEach(([grade, count]) => {
+        chipList.push({ label: `${count}+ ${grade}` });
+      });
+    }
+    if (filters.grade_min_percent) {
+      Object.entries(filters.grade_min_percent).forEach(([grade, pct]) => {
+        chipList.push({ label: `${pct}% ${grade}` });
+      });
+    }
+    if (filters.b_or_above_percent_min != null) {
+      chipList.push({ label: `${filters.b_or_above_percent_min}% B or above` });
+    }
+    if (filters.grade_max) {
+      Object.entries(filters.grade_max).forEach(([grade, max]) => {
+        chipList.push({ label: `Max ${max} ${grade}` });
+      });
+    }
+    if (filters.grade_compare) {
+      filters.grade_compare.forEach((cmp) => {
+        if (cmp.left && cmp.right && cmp.op) {
+          chipList.push({ label: `${cmp.left} ${cmp.op} ${cmp.right}` });
+        }
+      });
+    }
+    if (filters.exclude_instructors) {
+      filters.exclude_instructors.forEach((name) => chipList.push({ label: `Exclude instructor: ${name}` }));
+    }
+    if (filters.exclude_terms) {
+      filters.exclude_terms.forEach((t) => chipList.push({ label: `Exclude term: ${t}` }));
+    }
+    if ((filters as any).relative_term?.resolved) {
+      chipList.push({ label: `Term: ${(filters as any).relative_term.resolved}` });
+    }
+    if (filters.course_title_contains) {
+      filters.course_title_contains.forEach((t) => chipList.push({ label: `Title contains: ${t}` }));
+    }
+    const rank = (meta?.debug as any)?.rank_enrollment;
+    if (rank?.limit) {
+      chipList.push({ label: `${rank.order === 'ASC' ? 'Smallest' : 'Largest'} ${rank.limit} by enrollment` });
+    }
+    if (filters.credits_min != null || filters.credits_max != null) {
+      chipList.push({
+        label: `Credits: ${filters.credits_min ?? 'Any'}–${filters.credits_max ?? 'Any'}`,
+      });
+    }
+    if (filters.enrollment_min != null || filters.enrollment_max != null) {
+      chipList.push({
+        label: `Enrollment: ${filters.enrollment_min ?? 'Any'}–${filters.enrollment_max ?? 'Any'}`,
+      });
+    }
+    return chipList;
+  }, [filters, meta]);
+
+  const sortedResults = useMemo(() => {
+    const sorted = [...results];
+    sorted.sort((a, b) => {
+      const dir = sortDirection === 'asc' ? 1 : -1;
+      switch (sortField) {
+        case 'course':
+          return dir * `${a.department} ${a.course_number}`.localeCompare(`${b.department} ${b.course_number}`);
+        case 'instructor':
+          return dir * (a.instructor || '').localeCompare(b.instructor || '');
+        case 'semester':
+          return dir * (a.semester || '').localeCompare(b.semester || '');
+        case 'gpa':
+          return dir * (((a.gpa ?? 0) as number) - ((b.gpa ?? 0) as number));
+        case 'total_students':
+          return dir * ((a.total_students ?? 0) - (b.total_students ?? 0));
+        case 'b_or_above_percentage':
+        default:
+          return dir * ((a.b_or_above_percentage ?? 0) - (b.b_or_above_percentage ?? 0));
+      }
+    });
+    return sorted;
+  }, [results, sortDirection, sortField]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedResults.length / pageSize));
+  const paginatedResults = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return sortedResults.slice(start, start + pageSize);
+  }, [sortedResults, page, pageSize]);
+
+  const handleSort = (field: SortField) => {
+    if (field === sortField) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDirection(field === 'course' || field === 'instructor' || field === 'semester' ? 'asc' : 'desc');
+    }
+    setPage(1);
+  };
+
+  const handlePageChange = (nextPage: number) => {
+    if (nextPage < 1 || nextPage > totalPages) return;
+    setPage(nextPage);
+  };
+
+  // Restore cached state on mount for smoother back-navigation from detail pages.
+  useEffect(() => {
+    const cached = sessionStorage.getItem(CACHE_KEY);
+    if (!cached) return;
+    try {
+      const data = JSON.parse(cached);
+      if (data.results) setResults(data.results);
+      if (data.filters) setFilters(data.filters);
+      if (data.meta) setMeta(data.meta);
+      if (data.lastQuery) setLastQuery(data.lastQuery);
+      if (data.sortField) setSortField(data.sortField);
+      if (data.sortDirection) setSortDirection(data.sortDirection);
+      if (data.page) setPage(data.page);
+      if (data.pageSize) setPageSize(data.pageSize);
+      if (data.hasSearched) setHasSearched(data.hasSearched);
+    } catch {
+      // ignore parse errors
+    }
+  }, []);
+
+  // Persist state so returning from detail keeps results visible.
+  useEffect(() => {
+    if (!hasSearched) return;
+    const payload = {
+      results,
+      filters,
+      meta,
+      lastQuery,
+      sortField,
+      sortDirection,
+      page,
+      pageSize,
+      hasSearched,
+    };
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+  }, [results, filters, meta, lastQuery, sortField, sortDirection, page, pageSize, hasSearched]);
+
+  const handleCopyDebug = () => {
+    if (!meta) return;
+    const payload = JSON.stringify({ meta, result_count: results.length }, null, 2);
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(payload).then(() => setCopied(true));
+    } else {
+      setCopied(false);
+    }
+  };
+
+  const unrecognizedTokens = useMemo(() => {
+    const filtered = (meta?.debug as any)?.filtered_out;
+    if (!filtered) return [];
+    const tokens: string[] = [];
+    if (Array.isArray(filtered.subjects)) tokens.push(...filtered.subjects);
+    if (Array.isArray(filtered.instructors)) tokens.push(...filtered.instructors);
+    if (Array.isArray(filtered.course_title_contains)) {
+      // Ignore dropped title tokens to avoid noise.
+    }
+
+    // Drop tokens that are already represented in successful filters (e.g., "gpa" when gpa_min is set).
+    const recognized = new Set<string>();
+    if (filters?.subjects) filters.subjects.forEach((s) => recognized.add(s.toLowerCase()));
+    if (filters?.course_numbers) filters.course_numbers.forEach((c) => recognized.add(String(c).toLowerCase()));
+    if (filters?.instructors) filters.instructors.forEach((i) => recognized.add(i.toLowerCase()));
+    if (filters?.terms) filters.terms.forEach((t) => recognized.add(t.toLowerCase()));
+    if (filters?.gpa_min != null || filters?.gpa_max != null) recognized.add('gpa');
+    if (filters?.credits_min != null || filters?.credits_max != null) recognized.add('credits');
+    if (filters?.enrollment_min != null || filters?.enrollment_max != null) recognized.add('enrollment');
+    if (filters?.grade_min) {
+      Object.keys(filters.grade_min).forEach((g) => recognized.add(g.toLowerCase()));
+    }
+    if (filters?.grade_min_percent) {
+      Object.keys(filters.grade_min_percent).forEach((g) => recognized.add(g.toLowerCase()));
+    }
+    if (filters?.b_or_above_percent_min != null) {
+      recognized.add('b');
+    }
+    if (filters?.grade_max) {
+      Object.keys(filters.grade_max).forEach((g) => recognized.add(g.toLowerCase()));
+    }
+    if (filters?.exclude_instructors) {
+      filters.exclude_instructors.forEach((i) => {
+        const lower = i.toLowerCase();
+        recognized.add(lower);
+        recognized.add(`not ${lower}`);
+      });
+    }
+    if (filters?.exclude_terms) {
+      filters.exclude_terms.forEach((t) => recognized.add(t.toLowerCase()));
+    }
+    if (filters?.enrollment_min != null || filters?.enrollment_max != null) {
+      recognized.add('between');
+      recognized.add('enrollment');
+      recognized.add('students');
+    }
+    if (filters?.course_title_contains) {
+      filters.course_title_contains.forEach((t) => recognized.add(t.toLowerCase()));
+      recognized.add('title');
+      recognized.add('course');
+    }
+    const rank = (meta?.debug as any)?.rank_enrollment;
+    if (rank?.limit) {
+      recognized.add('largest');
+      recognized.add('smallest');
+      recognized.add('biggest');
+      recognized.add('most');
+    }
+    recognized.add('least');
+    recognized.add('at');
+    recognized.add('most');
+    recognized.add('more');
+    recognized.add('less');
+    recognized.add('fewer');
+
+    return tokens.filter((t) => !recognized.has(String(t).toLowerCase()));
+  }, [meta, filters]);
+
+  const handleSendToAssistant = () => {
+    if (!meta?.query) return;
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(meta.query);
+      setCopied(true);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-[#fdf6ec] via-[#f7ece1] to-[#f9f5f1]">
+      <div className="container mx-auto px-4 py-12">
+        <div className="flex flex-col items-center">
+          <div className="flex items-center gap-3 mb-4">
+            <BookOpen size={40} className="text-[#861f41]" />
+            <h1 className="text-4xl font-bold text-[#3b0d1f]">Grade Distribution Query</h1>
+          </div>
+
+          <p className="text-[#5b3a2c] mb-12 text-center max-w-2xl">
+            Search courses with natural language. If a query is unclear, we&apos;ll fall back to our assistant and still
+            show what we understood.
+          </p>
+
+          <QueryInput onSearch={handleSearch} isLoading={isLoading} initialValue={lastQuery} />
+
+          {isLoading && (
+            <div className="mt-8 text-[#5b3a2c]">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-8 w-full max-w-4xl p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+              {error}
+            </div>
+          )}
+
+          {!isLoading && hasSearched && (
+            <div className="w-full max-w-6xl mt-8 space-y-4">
+              {chips.length > 0 && (
+                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f] mb-3">
+                    <Filter size={16} className="text-[#e87722]" />
+                    Parsed filters
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {chips.map((chip, idx) => (
+                      <span
+                        key={`${chip.label}-${idx}`}
+                        className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3] text-sm"
+                      >
+                        {chip.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center gap-2 text-xs text-[#7a5a46]">
+                    <Info size={14} className="text-[#e87722]" />
+                    Edit the query to change filters. Complex asks may be routed to the assistant.
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="flex items-center gap-2 text-sm text-[#7a5a46]">
+                  <RefreshCw size={14} className="text-[#e87722]" />
+                  <span>Sort and paginate locally for quick browsing.</span>
+                </div>
+                <div className="flex flex-wrap gap-2 items-center text-sm">
+                  <label className="text-[#7a5a46]">Sort by</label>
+                  <select
+                    value={sortField}
+                    onChange={(e) => handleSort(e.target.value as SortField)}
+                    className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
+                  >
+                    <option value="b_or_above_percentage">B or Above %</option>
+                    <option value="gpa">Avg GPA</option>
+                    <option value="total_students">Students</option>
+                    <option value="course">Course</option>
+                    <option value="instructor">Instructor</option>
+                    <option value="semester">Term</option>
+                  </select>
+                  <button
+                    onClick={() => handleSort(sortField)}
+                    className="px-3 py-1.5 border border-[#f2cbb3] rounded-lg bg-white text-[#3b0d1f]"
+                  >
+                    {sortDirection === 'asc' ? 'Asc' : 'Desc'}
+                  </button>
+                  <label className="text-[#7a5a46] ml-2">Page size</label>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                    className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
+                  >
+                    {[5, 10, 20, 50].map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {unrecognizedTokens.length > 0 && (
+                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-sm font-semibold text-[#3b0d1f]">Unrecognized parts of your query</div>
+                    <button
+                      onClick={handleSendToAssistant}
+                      className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f]"
+                    >
+                      Send to assistant
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-sm text-[#7a5a46]">
+                    {unrecognizedTokens.map((t) => (
+                      <span key={t} className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3]">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <ResultsTable
+                results={paginatedResults}
+                totalCount={sortedResults.length}
+                page={page}
+                pageSize={pageSize}
+                onPageChange={handlePageChange}
+                sortField={sortField}
+                sortDirection={sortDirection}
+                onSort={handleSort}
+              />
+
+              {meta && (
+                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f]">
+                      <Bug size={16} className="text-[#e87722]" />
+                      Debug (dev only)
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShowDebug((prev) => !prev)}
+                        className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f]"
+                      >
+                        {showDebug ? 'Hide' : 'Show'}
+                      </button>
+                      <button
+                        onClick={handleCopyDebug}
+                        className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f] flex items-center gap-1"
+                      >
+                        <Clipboard size={12} />
+                        Copy
+                      </button>
+                      {copied && <span className="text-xs text-[#7a5a46]">Copied</span>}
+                    </div>
+                  </div>
+                  {showDebug && (
+                    <pre className="mt-2 text-xs bg-[#fdf6ec] border border-[#f2cbb3] rounded-lg p-3 overflow-auto max-h-72 text-[#3b0d1f]">
+                      {JSON.stringify({ meta, result_count: results.length }, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

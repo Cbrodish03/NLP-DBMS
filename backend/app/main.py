@@ -45,17 +45,15 @@ def health():
 @app.post("/query", response_model=QueryResponse)
 def query_endpoint(req: QueryRequest):
     plan = parse_query_to_plan(req.query)
-    filters = QueryFilters(**plan.filters.dict())
-    meta = QueryMeta(
-        query=req.query,
-        intent=plan.intent,
-        confidence=plan.confidence,
-        filters=filters,
-        debug=plan.debug,
-    )
-
     try:
-        sections, subjects, aggregates = execute_plan(plan)
+        sections, subjects, aggregates, normalized_filters = execute_plan(plan)
+        meta = QueryMeta(
+            query=req.query,
+            intent=plan.intent,
+            confidence=plan.confidence,
+            filters=normalized_filters,
+            debug=plan.debug,
+        )
         return QueryResponse(
             ok=True,
             meta=meta,
@@ -64,6 +62,13 @@ def query_endpoint(req: QueryRequest):
             subjects=subjects,
         )
     except Exception as exc:
+        meta = QueryMeta(
+            query=req.query,
+            intent=plan.intent,
+            confidence=plan.confidence,
+            filters=QueryFilters(**plan.filters.dict()),
+            debug=plan.debug,
+        )
         return QueryResponse(
             ok=False,
             meta=meta,

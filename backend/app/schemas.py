@@ -12,7 +12,15 @@ class QueryFilters(BaseModel):
     course_numbers: List[str] = Field(default_factory=list)
     instructors: List[str] = Field(default_factory=list)
     terms: List[str] = Field(default_factory=list)
+    course_title_contains: List[str] = Field(default_factory=list)
+    exclude_instructors: List[str] = Field(default_factory=list)
+    exclude_terms: List[str] = Field(default_factory=list)
     course_levels: List[str] = Field(default_factory=list)
+    grade_min: Dict[str, int] = Field(default_factory=dict)
+    grade_min_percent: Dict[str, float] = Field(default_factory=dict)
+    grade_max: Dict[str, int] = Field(default_factory=dict)
+    b_or_above_percent_min: Optional[float] = None
+    grade_compare: List[Dict[str, str]] = Field(default_factory=list)
 
     course_number_min: Optional[int] = None
     course_number_max: Optional[int] = None

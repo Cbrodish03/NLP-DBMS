@@ -8,7 +8,15 @@ class PlanFilters(BaseModel):
     course_numbers: List[str] = Field(default_factory=list)
     instructors: List[str] = Field(default_factory=list)
     terms: List[str] = Field(default_factory=list)
+    course_title_contains: List[str] = Field(default_factory=list)
+    exclude_instructors: List[str] = Field(default_factory=list)
+    exclude_terms: List[str] = Field(default_factory=list)
     course_levels: List[str] = Field(default_factory=list)  # e.g., UG, GR
+    grade_min: Dict[str, int] = Field(default_factory=dict)  # e.g., {"A": 5}
+    grade_min_percent: Dict[str, float] = Field(default_factory=dict)  # e.g., {"A": 40.0}
+    grade_max: Dict[str, int] = Field(default_factory=dict)  # e.g., {"D": 0}
+    b_or_above_percent_min: Optional[float] = None
+    grade_compare: List[Dict[str, str]] = Field(default_factory=list)  # e.g., [{"left": "A", "right": "B", "op": ">"}]
 
     course_number_min: Optional[int] = None
     course_number_max: Optional[int] = None
@@ -39,7 +47,7 @@ class QueryPlan(BaseModel):
     limit: Optional[int] = None
     sort_by: Optional[Literal["gpa", "enrollment", "term"]] = None
 
-    # For LLM / parser confidence later
+    # For parser confidence
     confidence: float = 1.0
 
     # For debug info we want to surface in meta.debug
