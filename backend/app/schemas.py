@@ -1,10 +1,10 @@
-# schemas.py
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
     query: str
+    parser_mode: Literal["regex", "ai"] = "regex"
 
 
 class QueryFilters(BaseModel):

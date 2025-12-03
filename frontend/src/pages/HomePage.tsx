@@ -9,12 +9,121 @@ import {
   type QueryFilters,
   type QueryMeta,
   type QueryResult,
+  type GradeDistribution,
 } from '../utils/queryProcessor';
 
-type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'b_or_above_percentage' | 'gpa';
+type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'threshold_percentage' | 'gpa';
 type SortDirection = 'asc' | 'desc';
 
 export const CACHE_KEY = 'vt_last_query_state';
+
+
+
+type GradeLetter =
+  | 'A+'
+  | 'A'
+  | 'A-'
+  | 'B+'
+  | 'B'
+  | 'B-'
+  | 'C+'
+  | 'C'
+  | 'C-'
+  | 'D+'
+  | 'D'
+  | 'D-'
+  | 'F';
+
+const GRADE_ORDER: GradeLetter[] = [
+  'A+',
+  'A',
+  'A-',
+  'B+',
+  'B',
+  'B-',
+  'C+',
+  'C',
+  'C-',
+  'D+',
+  'D',
+  'D-',
+  'F',
+];
+
+const GRADE_TO_KEY: Record<GradeLetter, keyof GradeDistribution> = {
+  'A+': 'a_plus',
+  'A': 'a',
+  'A-': 'a_minus',
+  'B+': 'b_plus',
+  'B': 'b',
+  'B-': 'b_minus',
+  'C+': 'c_plus',
+  'C': 'c',
+  'C-': 'c_minus',
+  'D+': 'd_plus',
+  'D': 'd',
+  'D-': 'd_minus',
+  'F': 'f',
+};
+
+// Standard 4.0-ish scale; tweak if you want to exactly match VT’s internal GPA scale.
+const GRADE_POINTS: Record<keyof GradeDistribution, number> = {
+  a_plus: 4.0,
+  a: 4.0,
+  a_minus: 3.7,
+  b_plus: 3.3,
+  b: 3.0,
+  b_minus: 2.7,
+  c_plus: 2.3,
+  c: 2.0,
+  c_minus: 1.7,
+  d_plus: 1.3,
+  d: 1.0,
+  d_minus: 0.7,
+  f: 0.0,
+};
+
+function computeGpaFromDistribution(dist: GradeDistribution): number | null {
+  let totalStudents = 0;
+  let totalPoints = 0;
+
+  (Object.keys(dist) as (keyof GradeDistribution)[]).forEach((key) => {
+    const count = dist[key] ?? 0;
+    const pts = GRADE_POINTS[key] ?? 0;
+    totalStudents += count;
+    totalPoints += count * pts;
+  });
+
+  if (!totalStudents) return null;
+  return totalPoints / totalStudents;
+}
+
+function computeThresholdStats(
+  result: QueryResult,
+  threshold: GradeLetter,
+): { count: number; pct: number } {
+  const dist = result.grade_distribution;
+  const thresholdIndex = GRADE_ORDER.indexOf(threshold);
+  if (thresholdIndex === -1) return { count: 0, pct: 0 };
+
+  let total = result.total_students ?? 0;
+  if (!total || total <= 0) {
+    // Fallback: recompute total from breakdown
+    total = (Object.values(dist) as number[]).reduce((acc, v) => acc + (v ?? 0), 0);
+  }
+  if (!total) return { count: 0, pct: 0 };
+
+  let count = 0;
+  for (let i = 0; i <= thresholdIndex; i++) {
+    const label = GRADE_ORDER[i];
+    const key = GRADE_TO_KEY[label];
+    count += dist[key] ?? 0;
+  }
+  const pct = (count / total) * 100;
+  return { count, pct };
+}
+
+// --- Component ---
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -22,8 +131,11 @@ export default function HomePage() {
   const [filters, setFilters] = useState<QueryFilters | null>(null);
   const [meta, setMeta] = useState<QueryMeta | null>(null);
   const [lastQuery, setLastQuery] = useState<string>('');
-  const [sortField, setSortField] = useState<SortField>('b_or_above_percentage');
+
+  // default: sort by GPA desc
+  const [sortField, setSortField] = useState<SortField>('gpa');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [isLoading, setIsLoading] = useState(false);
@@ -33,7 +145,15 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  const handleSearch = async (query: string) => {
+  // parser mode (regex vs ai)
+  const [parserMode, setParserMode] = useState<'regex' | 'ai'>('regex');
+
+  // new grade threshold for "grade and above" column
+  const [gradeThreshold, setGradeThreshold] = useState<GradeLetter>('B');
+
+  const handleSearch = async (query: string, modeOverride?: 'regex' | 'ai') => {
+    const mode = modeOverride ?? parserMode;
+
     setIsLoading(true);
     setError(null);
     setHasSearched(true);
@@ -41,9 +161,10 @@ export default function HomePage() {
     setCopied(false);
     setLastQuery(query);
     setSelectedIds([]);
+    setParserMode(mode); // remember which mode we just used
 
     try {
-      const data: ProcessedQueryResponse = await processQuery(query);
+      const data: ProcessedQueryResponse = await processQuery(query, mode);
       setResults(data.results);
       setFilters(data.meta?.filters ?? null);
       setMeta(data.meta ?? null);
@@ -159,17 +280,23 @@ export default function HomePage() {
           return dir * (a.instructor || '').localeCompare(b.instructor || '');
         case 'semester':
           return dir * (a.semester || '').localeCompare(b.semester || '');
-        case 'gpa':
-          return dir * (((a.gpa ?? 0) as number) - ((b.gpa ?? 0) as number));
+        case 'gpa': {
+          const gpaA = computeGpaFromDistribution(a.grade_distribution) ?? 0;
+          const gpaB = computeGpaFromDistribution(b.grade_distribution) ?? 0;
+          return dir * (gpaA - gpaB);
+        }
         case 'total_students':
           return dir * ((a.total_students ?? 0) - (b.total_students ?? 0));
-        case 'b_or_above_percentage':
-        default:
-          return dir * ((a.b_or_above_percentage ?? 0) - (b.b_or_above_percentage ?? 0));
+        case 'threshold_percentage':
+        default: {
+          const pctA = computeThresholdStats(a, gradeThreshold).pct;
+          const pctB = computeThresholdStats(b, gradeThreshold).pct;
+          return dir * (pctA - pctB);
+        }
       }
     });
     return sorted;
-  }, [results, sortDirection, sortField]);
+  }, [results, sortDirection, sortField, gradeThreshold]);
 
   const totalPages = Math.max(1, Math.ceil(sortedResults.length / pageSize));
   const paginatedResults = useMemo(() => {
@@ -210,6 +337,8 @@ export default function HomePage() {
       if (data.selectedIds || data.selectedCourseIds) {
         setSelectedIds(data.selectedIds ?? data.selectedCourseIds ?? []);
       }
+      if (data.parserMode) setParserMode(data.parserMode);
+      if (data.gradeThreshold) setGradeThreshold(data.gradeThreshold);
     } catch {
       // ignore parse errors
     }
@@ -229,9 +358,24 @@ export default function HomePage() {
       pageSize,
       hasSearched,
       selectedIds,
+      parserMode,
+      gradeThreshold,
     };
     sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload));
-  }, [results, filters, meta, lastQuery, sortField, sortDirection, page, pageSize, hasSearched, selectedIds]);
+  }, [
+    results,
+    filters,
+    meta,
+    lastQuery,
+    sortField,
+    sortDirection,
+    page,
+    pageSize,
+    hasSearched,
+    selectedIds,
+    parserMode,
+    gradeThreshold,
+  ]);
 
   const handleCopyDebug = () => {
     if (!meta) return;
@@ -326,175 +470,236 @@ export default function HomePage() {
           <div className="flex flex-col items-center">
             <div className="flex items-center gap-3 mb-4">
               <BookOpen size={40} className="text-[#861f41]" />
-              <h1 className="text-4xl font-bold text-[#3b0d1f]">Grade Distribution Query</h1>
+              <h1 className="text-4xl font-bold text-[#3b0d1f]">Virginia Tech Grade Distribution Query</h1>
             </div>
 
-          <p className="text-[#5b3a2c] mb-12 text-center max-w-2xl">
-            Search courses with natural language. If a query is unclear, we&apos;ll fall back to our assistant and still
-            show what we understood.
-          </p>
+            <p className="text-[#5b3a2c] mb-4 text-center max-w-2xl">
+              Search courses with natural language. Choose fast regex parsing or AI-assisted parsing when needed.
+            </p>
 
-          <QueryInput onSearch={handleSearch} isLoading={isLoading} initialValue={lastQuery} />
-
-          {isLoading && (
-            <div className="mt-8 text-[#5b3a2c]">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-              </div>
+            {/* Parser mode toggle */}
+            <div className="w-full max-w-4xl mb-4 flex flex-wrap items-center justify-center gap-2 text-sm">
+              <span className="text-[#7a5a46]">Parser mode:</span>
+              <button
+                type="button"
+                onClick={() => setParserMode('regex')}
+                className={`px-3 py-1.5 rounded-full border ${
+                  parserMode === 'regex'
+                    ? 'bg-[#861f41] text-white border-[#861f41]'
+                    : 'bg-white text-[#3b0d1f] border-[#f2cbb3]'
+                }`}
+              >
+                Regex (fast, default)
+              </button>
+              <button
+                type="button"
+                onClick={() => setParserMode('ai')}
+                className={`px-3 py-1.5 rounded-full border ${
+                  parserMode === 'ai'
+                    ? 'bg-[#861f41] text-white border-[#861f41]'
+                    : 'bg-white text-[#3b0d1f] border-[#f2cbb3]'
+                }`}
+              >
+                AI (ChatGPT)
+              </button>
             </div>
-          )}
 
-          {error && (
-            <div className="mt-8 w-full max-w-4xl p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
-              {error}
-            </div>
-          )}
+            <QueryInput
+              onSearch={(q) => {
+                void handleSearch(q);
+              }}
+              isLoading={isLoading}
+              initialValue={lastQuery}
+            />
 
-          {!isLoading && hasSearched && (
-            <div className="w-full max-w-6xl mt-8 space-y-4">
-              {chips.length > 0 && (
-                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f] mb-3">
-                    <Filter size={16} className="text-[#e87722]" />
-                    Parsed filters
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {chips.map((chip, idx) => (
-                      <span
-                        key={`${chip.label}-${idx}`}
-                        className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3] text-sm"
-                      >
-                        {chip.label}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="mt-3 flex items-center gap-2 text-xs text-[#7a5a46]">
-                    <Info size={14} className="text-[#e87722]" />
-                    Edit the query to change filters. Complex asks may be routed to the assistant.
-                  </div>
-                </div>
-              )}
-
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="flex items-center gap-2 text-sm text-[#7a5a46]">
-                  <RefreshCw size={14} className="text-[#e87722]" />
-                  <span>Sort and paginate locally for quick browsing.</span>
-                </div>
-                <div className="flex flex-wrap gap-2 items-center text-sm">
-                  {sortedResults.length > 1 && (
-                    <button
-                      onClick={handleCompareAll}
-                      className="px-3 py-1.5 rounded-lg bg-[#861f41] text-white hover:bg-[#6f1936] transition-colors"
-                    >
-                      Compare all
-                    </button>
-                  )}
-                  <label className="text-[#7a5a46]">Sort by</label>
-                  <select
-                    value={sortField}
-                    onChange={(e) => handleSort(e.target.value as SortField)}
-                    className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
-                  >
-                    <option value="b_or_above_percentage">B or Above %</option>
-                    <option value="gpa">Avg GPA</option>
-                    <option value="total_students">Students</option>
-                    <option value="course">Course</option>
-                    <option value="instructor">Instructor</option>
-                    <option value="semester">Term</option>
-                  </select>
-                  <button
-                    onClick={() => handleSort(sortField)}
-                    className="px-3 py-1.5 border border-[#f2cbb3] rounded-lg bg-white text-[#3b0d1f]"
-                  >
-                    {sortDirection === 'asc' ? 'Asc' : 'Desc'}
-                  </button>
-                  <label className="text-[#7a5a46] ml-2">Page size</label>
-                  <select
-                    value={pageSize}
-                    onChange={(e) => {
-                      setPageSize(Number(e.target.value));
-                      setPage(1);
-                    }}
-                    className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
-                  >
-                    {[5, 10, 20, 50].map((size) => (
-                      <option key={size} value={size}>
-                        {size}
-                      </option>
-                    ))}
-                  </select>
+            {isLoading && (
+              <div className="mt-8 text-[#5b3a2c]">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-[#e87722] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                 </div>
               </div>
+            )}
 
-              {unrecognizedTokens.length > 0 && (
-                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-sm font-semibold text-[#3b0d1f]">Unrecognized parts of your query</div>
-                    <button
-                      onClick={handleSendToAssistant}
-                      className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f]"
-                    >
-                      Send to assistant
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-sm text-[#7a5a46]">
-                    {unrecognizedTokens.map((t) => (
-                      <span key={t} className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3]">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
+            {error && (
+              <div className="mt-8 w-full max-w-4xl p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+                {error}
+              </div>
+            )}
 
-              <ResultsTable
-                results={paginatedResults}
-                totalCount={sortedResults.length}
-                page={page}
-                pageSize={pageSize}
-                onPageChange={handlePageChange}
-                sortField={sortField}
-                sortDirection={sortDirection}
-                onSort={handleSort}
-                selectedIds={selectedIds}
-                onToggleSelect={handleToggleSelect}
-              />
-
-              {meta && (
-                <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f]">
-                      <Bug size={16} className="text-[#e87722]" />
-                      Debug (dev only)
+            {!isLoading && hasSearched && (
+              <div className="w-full max-w-6xl mt-8 space-y-4">
+                {chips.length > 0 && (
+                  <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f] mb-3">
+                      <Filter size={16} className="text-[#e87722]" />
+                      Parsed filters
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap gap-2">
+                      {chips.map((chip, idx) => (
+                        <span
+                          key={`${chip.label}-${idx}`}
+                          className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3] text-sm"
+                        >
+                          {chip.label}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex items-center gap-2 text-xs text-[#7a5a46]">
+                      <Info size={14} className="text-[#e87722]" />
+                      Edit the query to change filters. You can retry with AI parsing if regex misses something.
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div className="flex items-center gap-2 text-sm text-[#7a5a46]">
+                    <RefreshCw size={14} className="text-[#e87722]" />
+                    <span>Sort and paginate locally for quick browsing.</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2 items-center text-sm">
+                    {sortedResults.length > 1 && (
                       <button
-                        onClick={() => setShowDebug((prev) => !prev)}
+                        onClick={handleCompareAll}
+                        className="px-3 py-1.5 rounded-lg bg-[#861f41] text-white hover:bg-[#6f1936] transition-colors"
+                      >
+                        Compare all
+                      </button>
+                    )}
+
+                    {/* Threshold selector */}
+                    <label className="text-[#7a5a46]">Threshold grade</label>
+                    <select
+                      value={gradeThreshold}
+                      onChange={(e) => setGradeThreshold(e.target.value as GradeLetter)}
+                      className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
+                    >
+                      {GRADE_ORDER.map((g) => (
+                        <option key={g} value={g}>
+                          {g}
+                        </option>
+                      ))}
+                    </select>
+
+                    <label className="text-[#7a5a46]">Sort by</label>
+                    <select
+                      value={sortField}
+                      onChange={(e) => handleSort(e.target.value as SortField)}
+                      className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
+                    >
+                      <option value="gpa">Avg GPA</option>
+                      <option value="threshold_percentage">
+                        Grade ≥ {gradeThreshold} %
+                      </option>
+                      <option value="total_students">Students</option>
+                      <option value="course">Course</option>
+                      <option value="instructor">Instructor</option>
+                      <option value="semester">Term</option>
+                    </select>
+                    <button
+                      onClick={() => handleSort(sortField)}
+                      className="px-3 py-1.5 border border-[#f2cbb3] rounded-lg bg-white text-[#3b0d1f]"
+                    >
+                      {sortDirection === 'asc' ? 'Asc' : 'Desc'}
+                    </button>
+                    <label className="text-[#7a5a46] ml-2">Page size</label>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => {
+                        setPageSize(Number(e.target.value));
+                        setPage(1);
+                      }}
+                      className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
+                    >
+                      {[5, 10, 20, 50].map((size) => (
+                        <option key={size} value={size}>
+                          {size}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {unrecognizedTokens.length > 0 && (
+                  <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-sm font-semibold text-[#3b0d1f]">Unrecognized parts of your query</div>
+                      <button
+                        onClick={handleSendToAssistant}
                         className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f]"
                       >
-                        {showDebug ? 'Hide' : 'Show'}
+                        Send to assistant
                       </button>
-                      <button
-                        onClick={handleCopyDebug}
-                        className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f] flex items-center gap-1"
-                      >
-                        <Clipboard size={12} />
-                        Copy
-                      </button>
-                      {copied && <span className="text-xs text-[#7a5a46]">Copied</span>}
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-sm text-[#7a5a46]">
+                      {unrecognizedTokens.map((t) => (
+                        <span
+                          key={t}
+                          className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3]"
+                        >
+                          {t}
+                        </span>
+                      ))}
                     </div>
                   </div>
-                  {showDebug && (
-                    <pre className="mt-2 text-xs bg-[#fdf6ec] border border-[#f2cbb3] rounded-lg p-3 overflow-auto max-h-72 text-[#3b0d1f]">
-                      {JSON.stringify({ meta, result_count: results.length }, null, 2)}
-                    </pre>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+                )}
+
+                <ResultsTable
+                  results={paginatedResults}
+                  totalCount={sortedResults.length}
+                  page={page}
+                  pageSize={pageSize}
+                  onPageChange={handlePageChange}
+                  sortField={sortField}
+                  sortDirection={sortDirection}
+                  onSort={handleSort}
+                  selectedIds={selectedIds}
+                  onToggleSelect={handleToggleSelect}
+                  thresholdGrade={gradeThreshold}
+                  onRetryWithAI={
+                    lastQuery && parserMode === 'regex'
+                      ? () => {
+                          if (!lastQuery) return;
+                          void handleSearch(lastQuery, 'ai');
+                        }
+                      : undefined
+                  }
+                />
+
+                {meta && (
+                  <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f]">
+                        <Bug size={16} className="text-[#e87722]" />
+                        Debug (dev only)
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setShowDebug((prev) => !prev)}
+                          className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f]"
+                        >
+                          {showDebug ? 'Hide' : 'Show'}
+                        </button>
+                        <button
+                          onClick={handleCopyDebug}
+                          className="text-xs px-3 py-1 rounded-lg border border-[#f2cbb3] bg-white text-[#3b0d1f] flex items-center gap-1"
+                        >
+                          <Clipboard size={12} />
+                          Copy
+                        </button>
+                        {copied && <span className="text-xs text-[#7a5a46]">Copied</span>}
+                      </div>
+                    </div>
+                    {showDebug && (
+                      <pre className="mt-2 text-xs bg-[#fdf6ec] border border-[#f2cbb3] rounded-lg p-3 overflow-auto max-h-72 text-[#3b0d1f]">
+                        {JSON.stringify({ meta, result_count: results.length }, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -4,14 +4,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from .db import get_db_conn
 from .executor import execute_plan, compute_aggregates
 from .nlp_parser import parse_query_to_plan
-from .ai_fallback_parser import ai_fallback_parse_query_to_plan  # NEW
+from .ai_fallback_parser import ai_fallback_parse_query_to_plan
 from .schemas import (
     QueryFilters,
     QueryMeta,
     QueryRequest,
     QueryResponse,
 )
-from .query_plan import QueryPlan  # NEW (for type hints)
+from .query_plan import QueryPlan
 
 app = FastAPI(title="VT UDC NLP API")
 
@@ -43,69 +43,36 @@ def health():
     return {"status": "ok", "db_ok": db_ok}
 
 
-# NEW: simple heuristic to decide when to call the AI fallback
-def is_low_signal(plan: QueryPlan) -> bool:
-    """
-    Decide when the rule-based parser is too weak / ambiguous and we should
-    try the AI fallback.
-
-    You can tune these thresholds as you test.
-    """
-    f = plan.filters
-
-    has_any_filters = any(
-        [
-            bool(getattr(f, "subjects", [])),
-            bool(getattr(f, "course_numbers", [])),
-            bool(getattr(f, "instructors", [])),
-            bool(getattr(f, "terms", [])),
-            bool(getattr(f, "course_title_contains", [])),
-            getattr(f, "course_number_min", None) is not None,
-            getattr(f, "course_number_max", None) is not None,
-            getattr(f, "gpa_min", None) is not None,
-            getattr(f, "gpa_max", None) is not None,
-            getattr(f, "credits_min", None) is not None,
-            getattr(f, "credits_max", None) is not None,
-            getattr(f, "enrollment_min", None) is not None,
-            getattr(f, "enrollment_max", None) is not None,
-        ]
-    )
-
-    # Low overall confidence? call AI.
-    if plan.confidence < 0.6:
-        return True
-
-    # Very vague browse query with no real filters → AI might help.
-    if plan.intent == "browse_subjects" and not has_any_filters:
-        return True
-
-    return False
-
-
 @app.post("/query", response_model=QueryResponse)
 def query_endpoint(req: QueryRequest):
-    # 1) Primary rule-based parse
-    primary_plan: QueryPlan = parse_query_to_plan(req.query)
-    plan_to_use: QueryPlan = primary_plan
+    """
+    Explicit parser selection:
+      - parser_mode="regex": always use rule-based parser.
+      - parser_mode="ai": try AI parser first, fall back to regex on failure.
+
+    The frontend can also hit this with parser_mode="ai" when the user clicks
+    "Retry with AI" or selects AI parsing in the UI.
+    """
     ai_used = False
 
-    # 2) Decide whether to invoke ChatGPT as parser-of-last-resort
-    if is_low_signal(primary_plan):
+    # Decide which parser to run
+    if req.parser_mode == "ai":
         ai_plan = ai_fallback_parse_query_to_plan(req.query)
         if ai_plan is not None:
-            # Keep original parser debug around for later analysis
-            ai_plan.debug.setdefault("primary_parser_debug", primary_plan.debug)
-            plan_to_use = ai_plan
+            plan_to_use: QueryPlan = ai_plan
             ai_used = True
         else:
-            # If AI fails, just fall back to the original plan
-            plan_to_use = primary_plan
+            # AI failed or API key not configured → fall back to regex
+            plan_to_use = parse_query_to_plan(req.query)
+    else:
+        # Default: pure regex / rule-based parser
+        plan_to_use = parse_query_to_plan(req.query)
 
-    # 3) Execute whichever plan we decided to use
     try:
         sections, subjects, aggregates, normalized_filters = execute_plan(plan_to_use)
 
         debug = plan_to_use.debug or {}
+        debug["parser_mode"] = req.parser_mode
         debug["ai_fallback_used"] = ai_used
 
         meta = QueryMeta(
@@ -122,10 +89,9 @@ def query_endpoint(req: QueryRequest):
             aggregates=aggregates,
             subjects=subjects,
         )
-
     except Exception as exc:
-        # Error path: still surface which plan we tried + whether AI was used
         debug = plan_to_use.debug or {}
+        debug["parser_mode"] = req.parser_mode
         debug["ai_fallback_used"] = ai_used
 
         meta = QueryMeta(
