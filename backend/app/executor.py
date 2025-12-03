@@ -259,8 +259,14 @@ def build_where_and_params(pf) -> Tuple[str, List[Any]]:
         clauses.append("NOT (s.instructor ILIKE ANY(%s))")
         params.append([f"%{i}%" for i in pf.exclude_instructors])
     if pf.terms:
-        clauses.append("s.term_label = ANY(%s)")
-        params.append(pf.terms)
+        exact_terms = [t for t in pf.terms if " " in t]
+        season_terms = [t for t in pf.terms if " " not in t]
+        if exact_terms:
+            clauses.append("s.term_label = ANY(%s)")
+            params.append(exact_terms)
+        if season_terms:
+            clauses.append("s.term_label ILIKE ANY(%s)")
+            params.append([f"{t} %" for t in season_terms])
     if getattr(pf, "exclude_terms", None):
         clauses.append("NOT (s.term_label = ANY(%s))")
         params.append(pf.exclude_terms)
@@ -396,7 +402,8 @@ def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[Subj
 
     sections: List[SectionInfo] = []
     subjects: Optional[List[SubjectInfo]] = None
-    normalized_filters = QueryFilters(**plan.filters.dict())
+    pf = plan.filters.copy(deep=True)
+    normalized_filters = QueryFilters(**pf.dict())
 
     try:
         if plan.intent == "course_lookup":

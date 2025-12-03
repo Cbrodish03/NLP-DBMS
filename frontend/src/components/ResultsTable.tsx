@@ -13,6 +13,8 @@ interface ResultsTableProps {
   sortField: SortField;
   sortDirection: 'asc' | 'desc';
   onSort: (field: SortField) => void;
+  selectedIds: string[];
+  onToggleSelect: (id: string) => void;
 }
 
 const SortLabel = ({
@@ -50,6 +52,8 @@ export default function ResultsTable({
   sortField,
   sortDirection,
   onSort,
+  selectedIds,
+  onToggleSelect,
 }: ResultsTableProps) {
   const navigate = useNavigate();
 
@@ -75,6 +79,7 @@ export default function ResultsTable({
         <table className="w-full">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
+              <th className="px-4 py-4 text-center text-sm font-semibold text-gray-700">Compare</th>
               <th className="px-6 py-4 text-left">
                 <SortLabel
                   label="Course"
@@ -147,11 +152,23 @@ export default function ResultsTable({
                 role="button"
                 tabIndex={0}
               >
+                <td className="px-4 py-4 text-center" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(result.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    onChange={() => onToggleSelect(result.id)}
+                    className="h-4 w-4 accent-[#861f41] cursor-pointer"
+                    aria-label={`Select ${result.department} ${result.course_number} for comparison`}
+                  />
+                </td>
                 <td className="px-6 py-4">
                   <div className="font-semibold text-gray-900">
                     {result.department} {result.course_number}
                   </div>
                   <div className="text-sm text-gray-600">{result.course_name}</div>
+                  <div className="text-xs text-gray-500 mt-1">Section {result.id}</div>
                 </td>
                 <td className="px-6 py-4 text-gray-700">{result.instructor}</td>
                 <td className="px-6 py-4 text-gray-700">{result.semester}</td>

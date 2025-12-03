@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Filter, Info, RefreshCw, Bug, Clipboard } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { BookOpen, Filter, Info, RefreshCw, Bug, Clipboard, GitCompare } from 'lucide-react';
 import QueryInput from '../components/QueryInput';
 import ResultsTable from '../components/ResultsTable';
 import {
@@ -13,9 +14,10 @@ import {
 type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'b_or_above_percentage' | 'gpa';
 type SortDirection = 'asc' | 'desc';
 
-const CACHE_KEY = 'vt_last_query_state';
+export const CACHE_KEY = 'vt_last_query_state';
 
 export default function HomePage() {
+  const navigate = useNavigate();
   const [results, setResults] = useState<QueryResult[]>([]);
   const [filters, setFilters] = useState<QueryFilters | null>(null);
   const [meta, setMeta] = useState<QueryMeta | null>(null);
@@ -29,6 +31,7 @@ export default function HomePage() {
   const [hasSearched, setHasSearched] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const handleSearch = async (query: string) => {
     setIsLoading(true);
@@ -37,6 +40,7 @@ export default function HomePage() {
     setPage(1);
     setCopied(false);
     setLastQuery(query);
+    setSelectedIds([]);
 
     try {
       const data: ProcessedQueryResponse = await processQuery(query);
@@ -51,6 +55,29 @@ export default function HomePage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const selectedCourses = useMemo(
+    () => results.filter((course) => selectedIds.includes(course.id)),
+    [results, selectedIds],
+  );
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((existing) => existing !== id) : [...prev, id]));
+  };
+
+  const handleClearSelection = () => setSelectedIds([]);
+
+  const handleCompare = () => {
+    if (selectedCourses.length < 2) return;
+    navigate('/compare', { state: { courses: selectedCourses } });
+  };
+
+  const handleCompareAll = () => {
+    if (sortedResults.length < 2) return;
+    const allIds = sortedResults.map((course) => course.id);
+    setSelectedIds(allIds);
+    navigate('/compare', { state: { courses: sortedResults } });
   };
 
   const chips = useMemo(() => {
@@ -180,6 +207,9 @@ export default function HomePage() {
       if (data.page) setPage(data.page);
       if (data.pageSize) setPageSize(data.pageSize);
       if (data.hasSearched) setHasSearched(data.hasSearched);
+      if (data.selectedIds || data.selectedCourseIds) {
+        setSelectedIds(data.selectedIds ?? data.selectedCourseIds ?? []);
+      }
     } catch {
       // ignore parse errors
     }
@@ -198,9 +228,10 @@ export default function HomePage() {
       page,
       pageSize,
       hasSearched,
+      selectedIds,
     };
     sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload));
-  }, [results, filters, meta, lastQuery, sortField, sortDirection, page, pageSize, hasSearched]);
+  }, [results, filters, meta, lastQuery, sortField, sortDirection, page, pageSize, hasSearched, selectedIds]);
 
   const handleCopyDebug = () => {
     if (!meta) return;
@@ -289,13 +320,14 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#fdf6ec] via-[#f7ece1] to-[#f9f5f1]">
-      <div className="container mx-auto px-4 py-12">
-        <div className="flex flex-col items-center">
-          <div className="flex items-center gap-3 mb-4">
-            <BookOpen size={40} className="text-[#861f41]" />
-            <h1 className="text-4xl font-bold text-[#3b0d1f]">Grade Distribution Query</h1>
-          </div>
+    <>
+      <div className="min-h-screen bg-gradient-to-br from-[#fdf6ec] via-[#f7ece1] to-[#f9f5f1]">
+        <div className="container mx-auto px-4 py-12">
+          <div className="flex flex-col items-center">
+            <div className="flex items-center gap-3 mb-4">
+              <BookOpen size={40} className="text-[#861f41]" />
+              <h1 className="text-4xl font-bold text-[#3b0d1f]">Grade Distribution Query</h1>
+            </div>
 
           <p className="text-[#5b3a2c] mb-12 text-center max-w-2xl">
             Search courses with natural language. If a query is unclear, we&apos;ll fall back to our assistant and still
@@ -351,6 +383,14 @@ export default function HomePage() {
                   <span>Sort and paginate locally for quick browsing.</span>
                 </div>
                 <div className="flex flex-wrap gap-2 items-center text-sm">
+                  {sortedResults.length > 1 && (
+                    <button
+                      onClick={handleCompareAll}
+                      className="px-3 py-1.5 rounded-lg bg-[#861f41] text-white hover:bg-[#6f1936] transition-colors"
+                    >
+                      Compare all
+                    </button>
+                  )}
                   <label className="text-[#7a5a46]">Sort by</label>
                   <select
                     value={sortField}
@@ -418,6 +458,8 @@ export default function HomePage() {
                 sortField={sortField}
                 sortDirection={sortDirection}
                 onSort={handleSort}
+                selectedIds={selectedIds}
+                onToggleSelect={handleToggleSelect}
               />
 
               {meta && (
@@ -453,8 +495,54 @@ export default function HomePage() {
               )}
             </div>
           )}
+          </div>
         </div>
       </div>
-    </div>
+
+      {selectedCourses.length > 0 && (
+        <div className="fixed right-4 bottom-4 md:top-24 md:bottom-auto w-[340px] max-w-[90vw] bg-white border border-[#f2cbb3] rounded-2xl shadow-2xl z-50 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 bg-[#fdf6ec] border-b border-[#f2cbb3]">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f]">
+              <GitCompare size={16} className="text-[#861f41]" />
+              {selectedCourses.length} selected for comparison
+            </div>
+            <button onClick={handleClearSelection} className="text-xs text-[#861f41] underline">
+              Clear
+            </button>
+          </div>
+
+          <div className="max-h-[60vh] overflow-y-auto divide-y divide-[#f2cbb3]">
+            {selectedCourses.map((course) => (
+              <div key={course.id} className="px-4 py-3 flex items-start gap-3">
+                <div className="flex-1">
+                  <div className="font-semibold text-[#3b0d1f]">
+                    {course.department} {course.course_number} · {course.course_name}
+                  </div>
+                  <div className="text-xs text-[#7a5a46]">
+                    {course.instructor || 'Instructor TBA'} · {course.semester || 'Term TBD'} · Section {course.id}
+                  </div>
+                </div>
+                <button onClick={() => handleToggleSelect(course.id)} className="text-xs text-[#861f41] underline">
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="px-4 py-3 flex flex-col gap-2 bg-[#fdf6ec] border-t border-[#f2cbb3]">
+            {selectedCourses.length < 2 && (
+              <div className="text-xs text-[#7a5a46]">Select at least two classes to enable comparison.</div>
+            )}
+            <button
+              onClick={handleCompare}
+              disabled={selectedCourses.length < 2}
+              className="w-full px-3 py-2 rounded-lg bg-[#861f41] text-white text-sm hover:bg-[#6f1936] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Compare classes
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
