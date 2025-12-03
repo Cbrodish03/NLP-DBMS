@@ -19,6 +19,7 @@ LEVEL_AFTER_RE = re.compile(r"\bLEVEL\s*(\d{3,4})\b", re.IGNORECASE)
 RANGE_RE = re.compile(r"\b(\d{3,4})\s*(?:-|to)\s*(\d{3,4})\b", re.IGNORECASE)
 PLACEHOLDER_RANGE_RE = re.compile(r"\b([A-Z]{2,4})\s+(\d)[xX]{3}\b")
 COURSE_BETWEEN_RE = re.compile(r"\bbetween\s+(\d{3,4})\s+(?:and|to)\s+(\d{3,4})\b", re.IGNORECASE)
+COURSE_PLUS_RE = re.compile(r"\b(\d{3,4})\s*\+\b")
 GPA_HIGH_RE = re.compile(r"GPA\s*(?:ABOVE|OVER|>=?|GREATER(?: THAN)?|HIGHER(?: THAN)?|OR MORE|OR HIGHER)\s*(\d\.\d)", re.IGNORECASE)
 GPA_LOW_RE = re.compile(r"GPA\s*(?:BELOW|UNDER|<=?|LESS(?: THAN)?|LOWER(?: THAN)?|OR LESS|OR LOWER)\s*(\d\.\d)", re.IGNORECASE)
 TERM_RE = re.compile(r"\b(Fall|Spring|Summer)\s+'?(\d{2}|\d{4})\b", re.IGNORECASE)
@@ -181,6 +182,30 @@ def _load_subject_aliases() -> Dict[str, str]:
     return _SUBJECT_ALIAS_CACHE
 
 
+def _is_known_instructor(name: str) -> bool:
+    """Check DB for an instructor match; conservative to avoid misclassifying course terms."""
+    conn = None
+    cur = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM instructor WHERE name_display ILIKE %s LIMIT 1;", (f"%{name}%",))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _is_descriptor(tok: spacy.tokens.Token) -> bool:
     """Heuristic: tokens that are structural/stopword-ish and should be ignored for fallback matching."""
     if tok.is_punct or tok.like_num:
@@ -242,6 +267,9 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         if not phrase:
             continue
         words = phrase.split()
+        # For single-word aliases (e.g., "management"), only match when the query itself is effectively that word.
+        if len(words) == 1 and len(query_words) > 1:
+            continue
         overlap = len(set(words) & query_words)
         # Require either full match for single-word names or at least 2-word overlap for multi-word names.
         if overlap == 0:
@@ -295,6 +323,17 @@ def parse_query_to_plan(text: str) -> QueryPlan:
             )
         else:
             _add_signal(debug, "subject_courses", {"subject_codes": subs, "course_numbers": nums})
+
+        # If a trailing "+" is present (e.g., "CS 3000+"), interpret as minimum course number.
+        if "+" in upper_text and filters.course_numbers:
+            for subj, num in subject_matches:
+                pattern = rf"{re.escape(subj)}\s*[- ]?\s*{re.escape(num)}\s*\+"
+                if re.search(pattern, upper_text):
+                    filters.course_number_min = int(num)
+                    filters.course_numbers = []
+                    has_single_course_match = False
+                    _add_signal(debug, "course_min_plus", {"course_number_min": filters.course_number_min})
+                    break
     # Placeholder like "CS 2xxx"
     if not filters.subjects:
         ph = PLACEHOLDER_RANGE_RE.search(text)
@@ -364,6 +403,7 @@ def parse_query_to_plan(text: str) -> QueryPlan:
 
     # Course level or numeric range (prefer explicit numeric range over inferred level)
     between_rng = COURSE_BETWEEN_RE.search(text)
+    plus_rng = COURSE_PLUS_RE.search(text)
     rng = RANGE_RE.search(text)
     lvl = LEVEL_RE.search(text) or LEVEL_AFTER_RE.search(text)
     if between_rng:
@@ -385,6 +425,11 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         filters.course_number_min = course_min
         filters.course_number_max = course_max
         _add_signal(debug, "level_range", {"course_number_min": course_min, "course_number_max": course_max})
+    elif plus_rng:
+        course_min = int(plus_rng.group(1))
+        filters.course_number_min = course_min
+        filters.course_numbers = []
+        _add_signal(debug, "course_min_plus", {"course_number_min": course_min})
     # If we have a range, drop any exact course number captured from subject_course
     if filters.course_number_min is not None or filters.course_number_max is not None:
         filters.course_numbers = []
@@ -461,6 +506,16 @@ def parse_query_to_plan(text: str) -> QueryPlan:
     # Instructor names: try spaCy PERSON entities first, then heuristics after "with/by/taught by"
     instructor_names = [ent.text.strip() for ent in doc.ents if ent.label_ == "PERSON"]
     instructor_names += INSTRUCTOR_RE.findall(text)
+    # If no PERSON entities were found, fall back to high-probability name-like tokens (alphabetic, length >=3).
+    if not instructor_names:
+        for tok in doc:
+            if tok.is_stop or tok.is_punct or tok.like_num:
+                continue
+            if not tok.text.isalpha():
+                continue
+            if len(tok.text) < 3:
+                continue
+            instructor_names.append(tok.text)
     instructor_names = [
         name
         for name in instructor_names
@@ -477,33 +532,11 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         # Skip if the entire name is already captured as a subject alias.
         if lowered_parts and all(p in alias_matched_words for p in lowered_parts):
             continue
-        if any(p.upper() in SUBJECT_STOPWORDS or p.lower() in STOP_WORDS for p in parts):
+        # Skip obvious stopwords/generic nouns, but keep single tokens we can't classify (e.g., "hamouda").
+        if len(parts) > 1 and any(p.upper() in SUBJECT_STOPWORDS or p.lower() in STOP_WORDS for p in parts):
             continue
         cleaned_instructors.append(name)
     instructor_names = cleaned_instructors
-    if not instructor_names:
-        # Fallback: grab trailing tokens that look like names (e.g., "cao", "sully" in "cs cao sully").
-        fallback: List[str] = []
-        for tok in reversed(doc):
-            word = tok.text.strip()
-            upper = word.upper()
-            if word.lower() in alias_matched_words:
-                continue
-            if _is_descriptor(tok):
-                continue
-            if not tok.is_alpha:
-                continue
-            if len(word) < 3:
-                continue
-            if upper in SUBJECT_STOPWORDS:
-                continue
-            if filters.subjects and upper in filters.subjects:
-                continue
-            fallback.append(word)
-            if len(fallback) >= 2:
-                break
-        instructor_names = list(reversed(fallback))
-
     if instructor_names:
         # Deduplicate while preserving order
         seen = set()
@@ -513,8 +546,21 @@ def parse_query_to_plan(text: str) -> QueryPlan:
             if key not in seen:
                 seen.add(key)
                 deduped.append(name)
-        filters.instructors = deduped
-        _add_signal(debug, "instructor", {"instructors": deduped})
+        # Verify against DB to avoid misclassifying course/title tokens.
+        verified = [n for n in deduped if _is_known_instructor(n)]
+        verified: List[str] = []
+        for n in deduped:
+            # Skip if this token is already a detected subject/alias to avoid collisions like "math".
+            if filters.subjects and n.upper() in filters.subjects:
+                continue
+            if n.lower() in alias_matched_words:
+                continue
+            if _is_known_instructor(n):
+                verified.append(n)
+        instructor_names = verified
+        if instructor_names:
+            filters.instructors = instructor_names
+            _add_signal(debug, "instructor", {"instructors": instructor_names})
 
     # Remove title terms that are actually instructor tokens to avoid noise.
     if filters.course_title_contains and instructor_names:
@@ -579,7 +625,11 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         _add_signal(debug, "grade_compare", {"left": left.upper(), "right": right.upper(), "op": op})
 
     # Exclusion phrases for instructors/terms
-    exclude_instr_matches = re.findall(r"\b(?:not|without|exclude)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)", text)
+    exclude_instr_matches = re.findall(
+        r"\b(?:not|without|exclude)\s+(?:instructor\s+|professor\s+)?([A-Za-z][A-Za-z]+(?:\s+[A-Za-z][A-Za-z]+)*)",
+        text,
+        flags=re.IGNORECASE,
+    )
     if exclude_instr_matches:
         cleaned = []
         for name in exclude_instr_matches:
@@ -738,6 +788,10 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         _add_signal(debug, "sort_term_asc")
 
     # Decide on intent
+    # If a numeric range was detected, treat as non-single lookup even if a course match was found.
+    if filters.course_number_min is not None or filters.course_number_max is not None:
+        has_single_course_match = False
+
     has_extra_filters = any(
         [
             filters.course_number_min is not None,
@@ -751,6 +805,7 @@ def parse_query_to_plan(text: str) -> QueryPlan:
             filters.credits_max is not None,
             filters.enrollment_min is not None,
             filters.enrollment_max is not None,
+            bool(filters.course_title_contains),
         ]
     )
     has_any_filters = any(
@@ -767,6 +822,7 @@ def parse_query_to_plan(text: str) -> QueryPlan:
             filters.credits_max is not None,
             filters.enrollment_min is not None,
             filters.enrollment_max is not None,
+            bool(filters.course_title_contains),
         ]
     )
 

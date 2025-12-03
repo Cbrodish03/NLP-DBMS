@@ -402,7 +402,8 @@ def execute_plan(plan: QueryPlan) -> Tuple[List[SectionInfo], Optional[List[Subj
 
     sections: List[SectionInfo] = []
     subjects: Optional[List[SubjectInfo]] = None
-    normalized_filters = QueryFilters(**plan.filters.dict())
+    pf = plan.filters.copy(deep=True)
+    normalized_filters = QueryFilters(**pf.dict())
 
     try:
         if plan.intent == "course_lookup":

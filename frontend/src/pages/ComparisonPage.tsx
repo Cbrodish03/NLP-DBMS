@@ -25,6 +25,22 @@ const gradeDisplay: Array<{ key: GradeKey; label: string; color: string }> = [
   { key: 'f', label: 'F', color: 'bg-red-400' },
 ];
 
+const gpaBadgeClass = (gpa: number | null | undefined) => {
+  if (gpa == null) return 'bg-gray-100 text-gray-600';
+  if (gpa >= 3.5) return 'bg-green-100 text-green-700';
+  if (gpa >= 3.0) return 'bg-emerald-50 text-emerald-700';
+  if (gpa >= 2.5) return 'bg-yellow-50 text-yellow-700';
+  return 'bg-red-50 text-red-700';
+};
+
+const bAboveBadgeClass = (pct: number | null | undefined) => {
+  if (pct == null) return 'bg-gray-100 text-gray-600';
+  if (pct >= 90) return 'bg-green-100 text-green-700';
+  if (pct >= 80) return 'bg-emerald-50 text-emerald-700';
+  if (pct >= 70) return 'bg-yellow-50 text-yellow-700';
+  return 'bg-red-50 text-red-700';
+};
+
 function restoreFromCache(): QueryResult[] {
   const cached = sessionStorage.getItem(CACHE_KEY);
   if (!cached) return [];
@@ -273,10 +289,18 @@ export default function ComparisonPage() {
                     </div>
                     <div className="px-4 py-3 text-center font-semibold">{course.total_students}</div>
                     <div className="px-4 py-3 text-center font-semibold">
-                      {course.gpa != null ? course.gpa.toFixed(2) : '—'}
+                      <span
+                        className={`inline-flex items-center justify-center px-3 py-1 rounded-full text-sm font-semibold ${gpaBadgeClass(course.gpa)}`}
+                      >
+                        {course.gpa != null ? course.gpa.toFixed(2) : '—'}
+                      </span>
                     </div>
                     <div className="px-4 py-3 text-center">
-                      <div className="inline-flex items-center gap-2 rounded-full bg-[#fce9dd] px-3 py-1 text-[#7a102d] font-semibold">
+                      <div
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold ${bAboveBadgeClass(
+                          course.b_or_above_percentage,
+                        )}`}
+                      >
                         <TrendingUp size={14} />
                         {course.b_or_above_percentage.toFixed(1)}%
                       </div>
@@ -320,10 +344,20 @@ export default function ComparisonPage() {
                       <div className="px-4 py-3 text-center">{instructor.courses.length}</div>
                       <div className="px-4 py-3 text-center font-semibold">{instructor.totalStudents}</div>
                       <div className="px-4 py-3 text-center font-semibold">
-                        {instructor.avgGpa != null ? instructor.avgGpa.toFixed(2) : '—'}
+                        <span
+                          className={`inline-flex items-center justify-center px-3 py-1 rounded-full text-sm font-semibold ${gpaBadgeClass(
+                            instructor.avgGpa,
+                          )}`}
+                        >
+                          {instructor.avgGpa != null ? instructor.avgGpa.toFixed(2) : '—'}
+                        </span>
                       </div>
                       <div className="px-4 py-3 text-center">
-                        <div className="inline-flex items-center gap-2 rounded-full bg-[#fce9dd] px-3 py-1 text-[#7a102d] font-semibold">
+                        <div
+                          className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold ${bAboveBadgeClass(
+                            instructor.bPercent,
+                          )}`}
+                        >
                           <TrendingUp size={14} />
                           {instructor.bPercent.toFixed(1)}%
                         </div>
