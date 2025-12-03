@@ -27,6 +27,10 @@ services:
       POSTGRES_DB: nlp
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+
+      
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
     depends_on:
       db:
         condition: service_healthy
@@ -45,7 +49,6 @@ services:
     ports:
       - "3000:5173"
     volumes:
-      # Hot reload: mount source + keep node_modules inside Docker (Linux)
       - ./frontend:/app
       - frontend_node_modules_v2:/app/node_modules
 
