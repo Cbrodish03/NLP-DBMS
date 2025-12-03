@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple
 import spacy
 from spacy.lang.en.stop_words import STOP_WORDS
 
+from .db import get_db_conn
 from .query_plan import QueryPlan, PlanFilters
 
 
@@ -22,6 +23,8 @@ GPA_HIGH_RE = re.compile(r"GPA\s*(?:ABOVE|OVER|>=?|GREATER(?: THAN)?|HIGHER(?: T
 GPA_LOW_RE = re.compile(r"GPA\s*(?:BELOW|UNDER|<=?|LESS(?: THAN)?|LOWER(?: THAN)?|OR LESS|OR LOWER)\s*(\d\.\d)", re.IGNORECASE)
 TERM_RE = re.compile(r"\b(Fall|Spring|Summer)\s+'?(\d{2}|\d{4})\b", re.IGNORECASE)
 RELATIVE_TERM_RE = re.compile(r"\b(last|this)\s+(spring|fall|summer)\b", re.IGNORECASE)
+YEAR_RE = re.compile(r"\b(20\d{2})\b")
+SEASON_ONLY_RE = re.compile(r"\b(spring|fall|summer)\b", re.IGNORECASE)
 INSTRUCTOR_RE = re.compile(r"\b(?:WITH|BY|TAUGHT BY)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)", re.IGNORECASE)
 CREDIT_RE = re.compile(r"(\d{1,2})\s*(?:CREDIT|CREDITS|CR)\b", re.IGNORECASE)
 ENROLLMENT_RE = re.compile(r"(?:ENROLLMENT|STUDENTS|PEOPLE)\s*(?:ABOVE|OVER|>=?)\s*(\d+)", re.IGNORECASE)
@@ -51,6 +54,7 @@ ENROLLMENT_BETWEEN_ALT_RE = re.compile(
     r"(?:enrollment|students|people)\s+(?:between|from)\s+(\d+)\s+(?:and|to)\s+(\d+)",
     re.IGNORECASE,
 )
+ENROLLMENT_PLUS_RE = re.compile(r"(\d+)\s*\+\s*(?:students|people)", re.IGNORECASE)
 LARGEST_K_RE = re.compile(r"(?:largest|biggest|most students|highest enrollment)\s+(\d+)", re.IGNORECASE)
 SMALLEST_K_RE = re.compile(r"(?:smallest|fewest|least students)\s+(\d+)", re.IGNORECASE)
 
@@ -104,6 +108,9 @@ SUBJECT_STOPWORD_EXTRAS = {
     "STUDENT",
     "STUDENTS",
     "PEOPLE",
+    "AVG",
+    "AVERAGE",
+    "MEAN",
     "LARGEST",
     "SMALLEST",
     "LEAST",
@@ -124,6 +131,54 @@ SUBJECT_STOPWORD_EXTRAS = {
     "PROFESSOR",
 }
 SUBJECT_STOPWORDS = {w.upper() for w in STOP_WORDS} | SUBJECT_STOPWORD_EXTRAS
+
+# Cache subject aliases from the database (e.g., "computer science" -> "CS").
+_SUBJECT_ALIAS_CACHE: Dict[str, str] = {}
+_SUBJECT_ALIAS_LOADED = False
+
+
+def _normalize_phrase(text: str) -> str:
+    """Lowercase, replace connectors, and trim extra spaces for reliable alias matching."""
+    norm = text.lower()
+    norm = norm.replace("&", " and ")
+    norm = norm.replace("/", " ")
+    norm = re.sub(r"[^\w\s]", " ", norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
+def _load_subject_aliases() -> Dict[str, str]:
+    global _SUBJECT_ALIAS_LOADED, _SUBJECT_ALIAS_CACHE
+    if _SUBJECT_ALIAS_LOADED:
+        return _SUBJECT_ALIAS_CACHE
+    conn = None
+    cur = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT subject_code, name FROM subject WHERE name IS NOT NULL;")
+        for code, name in cur.fetchall():
+            if not name:
+                continue
+            phrase = _normalize_phrase(str(name))
+            if not phrase:
+                continue
+            _SUBJECT_ALIAS_CACHE[phrase] = str(code).strip().upper()
+        _SUBJECT_ALIAS_LOADED = True
+    except Exception:
+        _SUBJECT_ALIAS_LOADED = True
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return _SUBJECT_ALIAS_CACHE
 
 
 def _is_descriptor(tok: spacy.tokens.Token) -> bool:
@@ -174,15 +229,72 @@ def parse_query_to_plan(text: str) -> QueryPlan:
 
     filters = PlanFilters()
     debug: Dict[str, Any] = {"tokens": tokens, "signals": []}
+    alias_matched_words: set[str] = set()
 
-    # Subject + course number like "CS 2104" / "CS-2104" / "CS2104"
-    m = SUBJECT_COURSE_RE.search(upper_text)
-    if m:
-        subject_code, course_number = m.group(1), m.group(2)
-        if subject_code not in SUBJECT_STOPWORDS:
-            filters.subjects = [subject_code]
-            filters.course_numbers = [course_number]
-            _add_signal(debug, "subject_course", {"subject_code": subject_code, "course_number": course_number})
+    # Subject aliases via DB subject names (e.g., "computer science" -> "CS").
+    # Prefer the longest phrase match to avoid partial hits like "engineering" swallowing "electrical engineering".
+    lowered = _normalize_phrase(text)
+    alias_items = sorted(_load_subject_aliases().items(), key=lambda kv: len(kv[0]), reverse=True)
+    query_words = set(lowered.split())
+    best_alias = None
+    best_score = (-1, -1)  # (overlap_count, phrase_len)
+    for phrase, code in alias_items:
+        if not phrase:
+            continue
+        words = phrase.split()
+        overlap = len(set(words) & query_words)
+        # Require either full match for single-word names or at least 2-word overlap for multi-word names.
+        if overlap == 0:
+            continue
+        if len(words) == 1 and overlap < 1:
+            continue
+        if len(words) > 1 and overlap < 2:
+            continue
+        score = (overlap, len(words))
+        if score > best_score:
+            best_score = score
+            best_alias = (phrase, code, words)
+
+    if best_alias:
+        phrase, code, words = best_alias
+        alias_matched_words.update(words)
+        if not filters.subjects:
+            filters.subjects = [code]
+            _add_signal(debug, "subject_alias", {"alias": phrase, "subject_code": code, "source": "db"})
+
+    has_single_course_match = False
+    # Subject + course number like "CS 2104" / "CS-2104" / "CS2104" (capture multiples)
+    subject_matches = [
+        (m.group(1), m.group(2)) for m in SUBJECT_COURSE_RE.finditer(upper_text) if m.group(1) not in SUBJECT_STOPWORDS
+    ]
+    if subject_matches:
+        sub_codes_raw = [s for s, _ in subject_matches]
+        course_nums_raw = [c for _, c in subject_matches]
+
+        def _dedupe(seq: List[str]) -> List[str]:
+            seen = set()
+            out: List[str] = []
+            for item in seq:
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
+
+        subs = _dedupe(sub_codes_raw)
+        nums = _dedupe(course_nums_raw)
+        if subs:
+            filters.subjects = subs
+        if nums:
+            filters.course_numbers = nums
+        if len(subject_matches) == 1:
+            has_single_course_match = True
+            _add_signal(
+                debug,
+                "subject_course",
+                {"subject_code": subject_matches[0][0], "course_number": subject_matches[0][1]},
+            )
+        else:
+            _add_signal(debug, "subject_courses", {"subject_codes": subs, "course_numbers": nums})
     # Placeholder like "CS 2xxx"
     if not filters.subjects:
         ph = PLACEHOLDER_RANGE_RE.search(text)
@@ -229,6 +341,8 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         if upper in SUBJECT_STOPWORDS:
             continue
         if filters.subjects and upper in filters.subjects:
+            continue
+        if word.lower() in alias_matched_words:
             continue
         if re.match(r"\d{3,4}", word):
             continue
@@ -326,6 +440,7 @@ def parse_query_to_plan(text: str) -> QueryPlan:
     enroll_hi = ENROLLMENT_RE.search(text)
     enroll_lo = ENROLLMENT_LOW_RE.search(text)
     between = ENROLLMENT_BETWEEN_RE.search(text) or ENROLLMENT_BETWEEN_ALT_RE.search(text)
+    enroll_plus = ENROLLMENT_PLUS_RE.search(text)
     if between:
         start, end = int(between.group(1)), int(between.group(2))
         if start > end:
@@ -339,6 +454,9 @@ def parse_query_to_plan(text: str) -> QueryPlan:
     if enroll_lo:
         filters.enrollment_max = int(enroll_lo.group(1))
         _add_signal(debug, "enrollment_max", {"enrollment_max": filters.enrollment_max})
+    if enroll_plus and filters.enrollment_min is None:
+        filters.enrollment_min = int(enroll_plus.group(1))
+        _add_signal(debug, "enrollment_min", {"enrollment_min": filters.enrollment_min, "pattern": "plus"})
 
     # Instructor names: try spaCy PERSON entities first, then heuristics after "with/by/taught by"
     instructor_names = [ent.text.strip() for ent in doc.ents if ent.label_ == "PERSON"]
@@ -355,6 +473,10 @@ def parse_query_to_plan(text: str) -> QueryPlan:
     cleaned_instructors: List[str] = []
     for name in instructor_names:
         parts = name.replace(",", " ").split()
+        lowered_parts = [p.lower() for p in parts]
+        # Skip if the entire name is already captured as a subject alias.
+        if lowered_parts and all(p in alias_matched_words for p in lowered_parts):
+            continue
         if any(p.upper() in SUBJECT_STOPWORDS or p.lower() in STOP_WORDS for p in parts):
             continue
         cleaned_instructors.append(name)
@@ -365,6 +487,8 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         for tok in reversed(doc):
             word = tok.text.strip()
             upper = word.upper()
+            if word.lower() in alias_matched_words:
+                continue
             if _is_descriptor(tok):
                 continue
             if not tok.is_alpha:
@@ -391,6 +515,29 @@ def parse_query_to_plan(text: str) -> QueryPlan:
                 deduped.append(name)
         filters.instructors = deduped
         _add_signal(debug, "instructor", {"instructors": deduped})
+
+    # Remove title terms that are actually instructor tokens to avoid noise.
+    if filters.course_title_contains and instructor_names:
+        instructor_terms = set()
+        for name in instructor_names:
+            for part in name.lower().split():
+                instructor_terms.add(part)
+        filtered_titles: List[str] = []
+        dropped_titles: List[str] = []
+        for term in filters.course_title_contains:
+            if term.lower() in instructor_terms:
+                dropped_titles.append(term)
+                continue
+            filtered_titles.append(term)
+        filters.course_title_contains = filtered_titles
+        if dropped_titles:
+            debug.setdefault("filtered_out", {})["course_title_contains"] = (
+                debug.get("filtered_out", {}).get("course_title_contains", []) + dropped_titles
+            )
+            # Update course_title debug detail to reflect the filtered list.
+            course_title_detail = debug.get("details", {}).get("course_title")
+            if course_title_detail is not None:
+                course_title_detail["contains"] = filtered_titles
 
     # Grade counts like "5 students got an A"
     grade_match = GRADE_COUNT_RE.search(text)
@@ -506,6 +653,18 @@ def parse_query_to_plan(text: str) -> QueryPlan:
             debug.setdefault("relative_term", {})["season"] = season
             debug["relative_term"]["when"] = when
             _add_signal(debug, "relative_term", {"season": season, "when": when})
+        else:
+            year_match = YEAR_RE.search(text)
+            if year_match:
+                year_full = year_match.group(1)
+                filters.terms = [f"{s} {year_full}" for s in ("Spring", "Summer", "Fall")]
+                _add_signal(debug, "year_terms", {"year": year_full, "terms": filters.terms})
+            else:
+                season_only = SEASON_ONLY_RE.search(text)
+                if season_only:
+                    season = season_only.group(1).title()
+                    filters.terms = [season]
+                    _add_signal(debug, "term_season_only", {"season": season})
 
     # If term recognition accidentally captured season/year as subject/course (e.g., "Fall 2024"),
     # drop that match so we can re-run subject fallback.
@@ -611,7 +770,7 @@ def parse_query_to_plan(text: str) -> QueryPlan:
         ]
     )
 
-    if m and not has_extra_filters and not (filters.course_number_min or filters.course_number_max):
+    if has_single_course_match and not has_extra_filters and not (filters.course_number_min or filters.course_number_max):
         intent = "course_lookup"
     elif has_any_filters:
         intent = "section_filter"
