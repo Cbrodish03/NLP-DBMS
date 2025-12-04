@@ -9,15 +9,30 @@ import {
   type QueryFilters,
   type QueryMeta,
   type QueryResult,
-  type GradeDistribution,
 } from '../utils/queryProcessor';
 
 type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'threshold_percentage' | 'gpa';
 type SortDirection = 'asc' | 'desc';
 
+interface GradeDistribution {
+  // NOTE: matches QueryResult.grade_distribution shape (no a_plus key)
+  a: number;
+  a_minus: number;
+  b_plus: number;
+  b: number;
+  b_minus: number;
+  c_plus: number;
+  c: number;
+  c_minus: number;
+  d_plus: number;
+  d: number;
+  d_minus: number;
+  f: number;
+}
+
 export const CACHE_KEY = 'vt_last_query_state';
 
-
+// --- Grade helpers shared across HomePage ---
 
 type GradeLetter =
   | 'A+'
@@ -50,8 +65,9 @@ const GRADE_ORDER: GradeLetter[] = [
   'F',
 ];
 
+// Map A+ → 'a' so we don’t need an explicit a_plus field in the data
 const GRADE_TO_KEY: Record<GradeLetter, keyof GradeDistribution> = {
-  'A+': 'a_plus',
+  'A+': 'a',
   'A': 'a',
   'A-': 'a_minus',
   'B+': 'b_plus',
@@ -66,9 +82,8 @@ const GRADE_TO_KEY: Record<GradeLetter, keyof GradeDistribution> = {
   'F': 'f',
 };
 
-// Standard 4.0-ish scale; tweak if you want to exactly match VT’s internal GPA scale.
+// Standard 4.0-ish scale; tweak if you want to match VT’s internal scale more precisely
 const GRADE_POINTS: Record<keyof GradeDistribution, number> = {
-  a_plus: 4.0,
   a: 4.0,
   a_minus: 3.7,
   b_plus: 3.3,
@@ -102,7 +117,7 @@ function computeThresholdStats(
   result: QueryResult,
   threshold: GradeLetter,
 ): { count: number; pct: number } {
-  const dist = result.grade_distribution;
+  const dist = result.grade_distribution as GradeDistribution;
   const thresholdIndex = GRADE_ORDER.indexOf(threshold);
   if (thresholdIndex === -1) return { count: 0, pct: 0 };
 
@@ -123,16 +138,36 @@ function computeThresholdStats(
   return { count, pct };
 }
 
+// --- Extra types for editable chips ---
+
+type ChipKind = 'subject' | 'instructor' | 'term' | 'other';
+
+interface Chip {
+  label: string;
+  kind: ChipKind;
+}
+
+interface ActiveFilters {
+  subject?: string;
+  instructor?: string;
+  term?: string;
+}
+
 // --- Component ---
 
 export default function HomePage() {
   const navigate = useNavigate();
+
+  // Raw results from backend (always the full set for this query)
+  const [baseResults, setBaseResults] = useState<QueryResult[]>([]);
+  // Currently displayed results (after any client-side chip filtering)
   const [results, setResults] = useState<QueryResult[]>([]);
+
   const [filters, setFilters] = useState<QueryFilters | null>(null);
   const [meta, setMeta] = useState<QueryMeta | null>(null);
   const [lastQuery, setLastQuery] = useState<string>('');
 
-  // default: sort by GPA desc
+  // DEFAULT: sort by GPA desc
   const [sortField, setSortField] = useState<SortField>('gpa');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
@@ -145,11 +180,27 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  // parser mode (regex vs ai)
+  // Parser mode (regex vs ai)
   const [parserMode, setParserMode] = useState<'regex' | 'ai'>('regex');
 
-  // new grade threshold for "grade and above" column
+  // Grade threshold for "grade and above" column
   const [gradeThreshold, setGradeThreshold] = useState<GradeLetter>('B');
+
+  // Active client-side filters that come from editable chips
+  const [activeFilters, setActiveFilters] = useState<ActiveFilters>({});
+
+  // AI / GPT explanation of the query
+  const [aiResponse, setAiResponse] = useState<string | null>(null);
+
+  // Helper: apply client-side filters to baseResults
+  const applyActiveFilters = (data: QueryResult[], af: ActiveFilters): QueryResult[] => {
+    return data.filter((r) => {
+      if (af.subject && r.department !== af.subject) return false;
+      if (af.instructor && r.instructor !== af.instructor) return false;
+      if (af.term && r.semester !== af.term) return false;
+      return true;
+    });
+  };
 
   const handleSearch = async (query: string, modeOverride?: 'regex' | 'ai') => {
     const mode = modeOverride ?? parserMode;
@@ -162,17 +213,36 @@ export default function HomePage() {
     setLastQuery(query);
     setSelectedIds([]);
     setParserMode(mode); // remember which mode we just used
+    setActiveFilters({}); // reset chip-based filters on new search
+    setAiResponse(null); // reset previous AI explanation
 
     try {
       const data: ProcessedQueryResponse = await processQuery(query, mode);
-      setResults(data.results);
+      setBaseResults(data.results);
+      setResults(data.results); // show full backend results initially
       setFilters(data.meta?.filters ?? null);
       setMeta(data.meta ?? null);
+
+      // Try to pull an AI/GPT explanation out of meta.debug
+      const debug = data.meta?.debug as any;
+      const possibleAi =
+        debug?.llm_response ??
+        debug?.ai_response ??
+        debug?.llm_explanation ??
+        debug?.raw_llm_output;
+
+      if (typeof possibleAi === 'string' && possibleAi.trim().length > 0) {
+        setAiResponse(possibleAi);
+      } else {
+        setAiResponse(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
+      setBaseResults([]);
       setResults([]);
       setFilters(null);
       setMeta(null);
+      setAiResponse(null);
     } finally {
       setIsLoading(false);
     }
@@ -201,69 +271,112 @@ export default function HomePage() {
     navigate('/compare', { state: { courses: sortedResults } });
   };
 
+  // Distinct values from the current backend result set, used for dropdown options
+  const allSubjects = useMemo(
+    () => Array.from(new Set(baseResults.map((r) => r.department))).sort(),
+    [baseResults],
+  );
+
+  const allInstructors = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          baseResults
+            .map((r) => r.instructor)
+            .filter((name) => !!name && name.trim().length > 0),
+        ),
+      ).sort(),
+    [baseResults],
+  );
+
+  const allTerms = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          baseResults
+            .map((r) => r.semester)
+            .filter((t) => !!t && t.trim().length > 0),
+        ),
+      ).sort(),
+    [baseResults],
+  );
+
+  // Build parsed-filter chips with metadata about what kind they are
   const chips = useMemo(() => {
     if (!filters) return [];
-    const chipList: { label: string }[] = [];
-    filters.subjects?.forEach((s) => chipList.push({ label: `Subject: ${s}` }));
-    filters.course_numbers?.forEach((c) => chipList.push({ label: `Course: ${c}` }));
+    const chipList: Chip[] = [];
+
+    filters.subjects?.forEach((s) => chipList.push({ label: `Subject: ${s}`, kind: 'subject' }));
+    filters.course_numbers?.forEach((c) => chipList.push({ label: `Course: ${c}`, kind: 'other' }));
     if (filters.course_number_min != null || filters.course_number_max != null) {
       chipList.push({
         label: `Course range: ${filters.course_number_min ?? 'Any'}–${filters.course_number_max ?? 'Any'}`,
+        kind: 'other',
       });
     }
-    if (filters.gpa_min != null) chipList.push({ label: `GPA ≥ ${filters.gpa_min}` });
-    if (filters.gpa_max != null) chipList.push({ label: `GPA ≤ ${filters.gpa_max}` });
-    filters.instructors?.forEach((name) => chipList.push({ label: `Instructor: ${name}` }));
-    filters.terms?.forEach((t) => chipList.push({ label: `Term: ${t}` }));
+    if (filters.gpa_min != null) chipList.push({ label: `GPA ≥ ${filters.gpa_min}`, kind: 'other' });
+    if (filters.gpa_max != null) chipList.push({ label: `GPA ≤ ${filters.gpa_max}`, kind: 'other' });
+    filters.instructors?.forEach((name) => chipList.push({ label: `Instructor: ${name}`, kind: 'instructor' }));
+    filters.terms?.forEach((t) => chipList.push({ label: `Term: ${t}`, kind: 'term' }));
     if (filters.grade_min) {
       Object.entries(filters.grade_min).forEach(([grade, count]) => {
-        chipList.push({ label: `${count}+ ${grade}` });
+        chipList.push({ label: `${count}+ ${grade}`, kind: 'other' });
       });
     }
     if (filters.grade_min_percent) {
       Object.entries(filters.grade_min_percent).forEach(([grade, pct]) => {
-        chipList.push({ label: `${pct}% ${grade}` });
+        chipList.push({ label: `${pct}% ${grade}`, kind: 'other' });
       });
     }
     if (filters.b_or_above_percent_min != null) {
-      chipList.push({ label: `${filters.b_or_above_percent_min}% B or above` });
+      chipList.push({ label: `${filters.b_or_above_percent_min}% B or above`, kind: 'other' });
     }
     if (filters.grade_max) {
       Object.entries(filters.grade_max).forEach(([grade, max]) => {
-        chipList.push({ label: `Max ${max} ${grade}` });
+        chipList.push({ label: `Max ${max} ${grade}`, kind: 'other' });
       });
     }
     if (filters.grade_compare) {
       filters.grade_compare.forEach((cmp) => {
         if (cmp.left && cmp.right && cmp.op) {
-          chipList.push({ label: `${cmp.left} ${cmp.op} ${cmp.right}` });
+          chipList.push({ label: `${cmp.left} ${cmp.op} ${cmp.right}`, kind: 'other' });
         }
       });
     }
     if (filters.exclude_instructors) {
-      filters.exclude_instructors.forEach((name) => chipList.push({ label: `Exclude instructor: ${name}` }));
+      filters.exclude_instructors.forEach((name) =>
+        chipList.push({ label: `Exclude instructor: ${name}`, kind: 'other' }),
+      );
     }
     if (filters.exclude_terms) {
-      filters.exclude_terms.forEach((t) => chipList.push({ label: `Exclude term: ${t}` }));
+      filters.exclude_terms.forEach((t) => chipList.push({ label: `Exclude term: ${t}`, kind: 'other' }));
     }
     if ((filters as any).relative_term?.resolved) {
-      chipList.push({ label: `Term: ${(filters as any).relative_term.resolved}` });
+      chipList.push({
+        label: `Term: ${(filters as any).relative_term.resolved}`,
+        kind: 'term',
+      });
     }
     if (filters.course_title_contains) {
-      filters.course_title_contains.forEach((t) => chipList.push({ label: `Title contains: ${t}` }));
+      filters.course_title_contains.forEach((t) => chipList.push({ label: `Title contains: ${t}`, kind: 'other' }));
     }
     const rank = (meta?.debug as any)?.rank_enrollment;
     if (rank?.limit) {
-      chipList.push({ label: `${rank.order === 'ASC' ? 'Smallest' : 'Largest'} ${rank.limit} by enrollment` });
+      chipList.push({
+        label: `${rank.order === 'ASC' ? 'Smallest' : 'Largest'} ${rank.limit} by enrollment`,
+        kind: 'other',
+      });
     }
     if (filters.credits_min != null || filters.credits_max != null) {
       chipList.push({
         label: `Credits: ${filters.credits_min ?? 'Any'}–${filters.credits_max ?? 'Any'}`,
+        kind: 'other',
       });
     }
     if (filters.enrollment_min != null || filters.enrollment_max != null) {
       chipList.push({
         label: `Enrollment: ${filters.enrollment_min ?? 'Any'}–${filters.enrollment_max ?? 'Any'}`,
+        kind: 'other',
       });
     }
     return chipList;
@@ -281,8 +394,8 @@ export default function HomePage() {
         case 'semester':
           return dir * (a.semester || '').localeCompare(b.semester || '');
         case 'gpa': {
-          const gpaA = computeGpaFromDistribution(a.grade_distribution) ?? 0;
-          const gpaB = computeGpaFromDistribution(b.grade_distribution) ?? 0;
+          const gpaA = computeGpaFromDistribution(a.grade_distribution as GradeDistribution) ?? 0;
+          const gpaB = computeGpaFromDistribution(b.grade_distribution as GradeDistribution) ?? 0;
           return dir * (gpaA - gpaB);
         }
         case 'total_students':
@@ -319,13 +432,37 @@ export default function HomePage() {
     setPage(nextPage);
   };
 
+  // Handle changing a filter via chip dropdown
+  const handleChipFilterChange = (kind: ChipKind, value: string) => {
+    if (kind === 'other') return;
+
+    setActiveFilters((prev) => {
+      const next: ActiveFilters = { ...prev };
+      if (kind === 'subject') {
+        next.subject = value;
+      } else if (kind === 'instructor') {
+        next.instructor = value;
+      } else if (kind === 'term') {
+        next.term = value;
+      }
+      const newResults = applyActiveFilters(baseResults, next);
+      setResults(newResults);
+      setPage(1);
+      setSelectedIds([]);
+      return next;
+    });
+  };
+
   // Restore cached state on mount for smoother back-navigation from detail pages.
   useEffect(() => {
     const cached = sessionStorage.getItem(CACHE_KEY);
     if (!cached) return;
     try {
       const data = JSON.parse(cached);
-      if (data.results) setResults(data.results);
+      if (data.results) {
+        setResults(data.results);
+        setBaseResults(data.results); // treat cached results as base for this session
+      }
       if (data.filters) setFilters(data.filters);
       if (data.meta) setMeta(data.meta);
       if (data.lastQuery) setLastQuery(data.lastQuery);
@@ -339,6 +476,8 @@ export default function HomePage() {
       }
       if (data.parserMode) setParserMode(data.parserMode);
       if (data.gradeThreshold) setGradeThreshold(data.gradeThreshold);
+      if (typeof data.aiResponse === 'string') setAiResponse(data.aiResponse);
+      // We don't persist activeFilters; new session starts with raw results.
     } catch {
       // ignore parse errors
     }
@@ -360,6 +499,7 @@ export default function HomePage() {
       selectedIds,
       parserMode,
       gradeThreshold,
+      aiResponse,
     };
     sessionStorage.setItem(CACHE_KEY, JSON.stringify(payload));
   }, [
@@ -375,6 +515,7 @@ export default function HomePage() {
     selectedIds,
     parserMode,
     gradeThreshold,
+    aiResponse,
   ]);
 
   const handleCopyDebug = () => {
@@ -463,6 +604,21 @@ export default function HomePage() {
     }
   };
 
+  // Helper for chip dropdown options
+  const getOptionsForChipKind = (kind: ChipKind): string[] => {
+    if (kind === 'subject') return allSubjects;
+    if (kind === 'instructor') return allInstructors;
+    if (kind === 'term') return allTerms;
+    return [];
+  };
+
+  const isOptionActive = (kind: ChipKind, value: string): boolean => {
+    if (kind === 'subject') return activeFilters.subject === value;
+    if (kind === 'instructor') return activeFilters.instructor === value;
+    if (kind === 'term') return activeFilters.term === value;
+    return false;
+  };
+
   return (
     <>
       <div className="min-h-screen bg-gradient-to-br from-[#fdf6ec] via-[#f7ece1] to-[#f9f5f1]">
@@ -530,25 +686,74 @@ export default function HomePage() {
 
             {!isLoading && hasSearched && (
               <div className="w-full max-w-6xl mt-8 space-y-4">
+                {/* AI / GPT response card */}
+                {aiResponse && (
+                  <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f] mb-2">
+                      <Info size={16} className="text-[#e87722]" />
+                      AI interpretation
+                    </div>
+                    <p className="text-sm text-[#5b3a2c] whitespace-pre-wrap">
+                      {aiResponse}
+                    </p>
+                  </div>
+                )}
+
                 {chips.length > 0 && (
                   <div className="bg-white border border-[#f2cbb3] rounded-xl p-4 shadow-sm">
                     <div className="flex items-center gap-2 text-sm font-semibold text-[#3b0d1f] mb-3">
                       <Filter size={16} className="text-[#e87722]" />
                       Parsed filters
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {chips.map((chip, idx) => (
-                        <span
-                          key={`${chip.label}-${idx}`}
-                          className="px-3 py-1 bg-[#fce9dd] text-[#7a102d] rounded-full border border-[#f2cbb3] text-sm"
-                        >
-                          {chip.label}
-                        </span>
-                      ))}
+                    <div className="flex flex-wrap gap-2 relative">
+                      {chips.map((chip, idx) => {
+                        const options = getOptionsForChipKind(chip.kind);
+                        const interactive = options.length > 0;
+
+                        return (
+                          <div key={`${chip.label}-${idx}`} className="relative group">
+                            <button
+                              type="button"
+                              className={`px-3 py-1 rounded-full border text-sm ${
+                                interactive
+                                  ? 'bg-[#fce9dd] text-[#7a102d] border-[#f2cbb3] cursor-pointer'
+                                  : 'bg-[#fce9dd] text-[#7a102d] border-[#f2cbb3] cursor-default'
+                              }`}
+                            >
+                              {chip.label}
+                            </button>
+                            {interactive && (
+                              <div className="absolute z-20 mt-1 hidden group-hover:block min-w-[200px] bg-white border border-[#f2cbb3] rounded-lg shadow-lg">
+                                <div className="px-3 py-2 text-xs text-[#7a5a46] border-b border-[#f2cbb3]">
+                                  Choose {chip.kind} to refine results
+                                </div>
+                                <ul className="max-h-56 overflow-y-auto text-sm">
+                                  {options.map((opt) => {
+                                    const active = isOptionActive(chip.kind, opt);
+                                    return (
+                                      <li key={opt}>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleChipFilterChange(chip.kind, opt)}
+                                          className={`w-full text-left px-3 py-2 hover:bg-[#fce9dd] ${
+                                            active ? 'bg-[#fce9dd] font-semibold text-[#7a102d]' : 'text-[#3b0d1f]'
+                                          }`}
+                                        >
+                                          {opt}
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="mt-3 flex items-center gap-2 text-xs text-[#7a5a46]">
                       <Info size={14} className="text-[#e87722]" />
-                      Edit the query to change filters. You can retry with AI parsing if regex misses something.
+                      Hover a filter chip to adjust subjects, instructors, or terms. Edit the query for deeper changes.
                     </div>
                   </div>
                 )}
@@ -589,9 +794,7 @@ export default function HomePage() {
                       className="border border-[#f2cbb3] rounded-lg px-3 py-1.5 text-[#3b0d1f] bg-white"
                     >
                       <option value="gpa">Avg GPA</option>
-                      <option value="threshold_percentage">
-                        Grade ≥ {gradeThreshold} %
-                      </option>
+                      <option value="threshold_percentage">Grade ≥ {gradeThreshold} %</option>
                       <option value="total_students">Students</option>
                       <option value="course">Course</option>
                       <option value="instructor">Instructor</option>

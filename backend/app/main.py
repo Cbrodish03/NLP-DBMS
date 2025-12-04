@@ -57,7 +57,9 @@ def query_endpoint(req: QueryRequest):
 
     # Decide which parser to run
     if req.parser_mode == "ai":
+        print("using AI")
         ai_plan = ai_fallback_parse_query_to_plan(req.query)
+        print(f"AI plan: {ai_plan}")
         if ai_plan is not None:
             plan_to_use: QueryPlan = ai_plan
             ai_used = True

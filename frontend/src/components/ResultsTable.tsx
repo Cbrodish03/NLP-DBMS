@@ -5,20 +5,22 @@ import type { QueryResult } from '../utils/queryProcessor';
 type SortField = 'course' | 'instructor' | 'semester' | 'total_students' | 'threshold_percentage' | 'gpa';
 
 interface GradeDistribution {
-  a_plus: number;
-  a: number;
-  a_minus: number;
-  b_plus: number;
-  b: number;
-  b_minus: number;
-  c_plus: number;
-  c: number;
-  c_minus: number;
-  d_plus: number;
-  d: number;
-  d_minus: number;
-  f: number;
+  a_plus?: number;
+  a?: number;
+  a_minus?: number;
+  b_plus?: number;
+  b?: number;
+  b_minus?: number;
+  c_plus?: number;
+  c?: number;
+  c_minus?: number;
+  d_plus?: number;
+  d?: number;
+  d_minus?: number;
+  f?: number;
 }
+
+
 
 interface ResultsTableProps {
   results: QueryResult[];

@@ -1,10 +1,12 @@
 import json
 import os
-from typing import Optional, Any, Dict
+import difflib
+from typing import Optional, Any, Dict, List
 
 from openai import OpenAI  # pip install openai>=1.0.0
 
 from .query_plan import QueryPlan, PlanFilters
+from .db import get_db_conn
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -36,6 +38,96 @@ def _empty_filters() -> Dict[str, Any]:
         "enrollment_min": None,
         "enrollment_max": None,
     }
+
+
+def _normalize_instructors(raw_names: List[str]) -> List[str]:
+    """
+    Take instructor strings from the AI (possibly misspelled or with
+    extra words like 'Professor') and map them to the best matching
+    instructor.name_display value from the database.
+
+    This avoids needing Postgres extensions like pg_trgm/similarity().
+    We:
+      - load all instructor names from the DB once,
+      - clean the AI string (strip titles),
+      - use difflib.get_close_matches for fuzzy matching,
+      - fall back to substring search or the cleaned name if needed.
+    """
+    if not raw_names:
+        return []
+
+    conn = get_db_conn()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("SELECT name_display FROM instructor;")
+        rows = cur.fetchall()
+    except Exception as e:
+        print("AI fallback: error loading instructors from DB:", repr(e))
+        cur.close()
+        conn.close()
+        # If we can't even read instructor names, just return cleaned raw names.
+        normalized_fallback: List[str] = []
+        for raw in raw_names:
+            cleaned = (
+                raw.replace("Professor", "")
+                .replace("Prof.", "")
+                .replace("Prof", "")
+                .replace("Dr.", "")
+                .replace("Dr", "")
+                .strip()
+            )
+            normalized_fallback.append(cleaned)
+        return normalized_fallback
+
+    names = [row[0] for row in rows if row and row[0]]
+    lower_to_original: Dict[str, str] = {}
+    for n in names:
+        ln = n.lower()
+        # if multiple rows have same lowercase name, keep the first
+        if ln not in lower_to_original:
+            lower_to_original[ln] = n
+
+    normalized: List[str] = []
+
+    for raw in raw_names:
+        cleaned = (
+            raw.replace("Professor", "")
+            .replace("Prof.", "")
+            .replace("Prof", "")
+            .replace("Dr.", "")
+            .replace("Dr", "")
+            .strip()
+        )
+
+        # Use the last reasonably long token as the main search key
+        tokens = [t for t in cleaned.split() if len(t) >= 3]
+        search_token = tokens[-1] if tokens else cleaned
+
+        best_match: Optional[str] = None
+
+        # 1) Fuzzy match on full names using difflib
+        candidate_lowers = list(lower_to_original.keys())
+        close = difflib.get_close_matches(
+            search_token.lower(), candidate_lowers, n=1, cutoff=0.6
+        )
+        if close:
+            best_match = lower_to_original[close[0]]
+
+        # 2) If no fuzzy match, try simple substring search
+        if best_match is None:
+            st_lower = search_token.lower()
+            candidate = next(
+                (n for n in names if st_lower in n.lower()),
+                None,
+            )
+            best_match = candidate
+
+        normalized.append(best_match or cleaned)
+
+    cur.close()
+    conn.close()
+    return normalized
 
 
 def ai_fallback_parse_query_to_plan(text: str) -> Optional[QueryPlan]:
@@ -98,6 +190,8 @@ Only output JSON using this schema:
 Rules:
 - Be conservative; if you are unsure, leave fields empty or null.
 - "subjects" must be upper-case subject codes like "MATH", "CS".
+- For instructors, remove titles like "Professor", "Prof.", "Dr.", "Mr.", "Ms." etc.
+- For instructors, prefer just the last name if that is all the user provides.
 - If the query talks about "easy", "easiest", "highest GPA", treat that as
   sort_by="gpa", sort_order="DESC".
 - If the query talks about "since YEAR" or "after YEAR", use a term range
@@ -111,107 +205,56 @@ Rules:
     user_prompt = f'User query:\n"{text}"'
 
     try:
+        print(f"AI fallback: calling OpenAI for query: {text}")
         resp = client.responses.create(
             model="gpt-4.1-mini",
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "QueryPlanFallback",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {
-                                "type": "string",
-                                "enum": ["course_lookup", "section_filter", "browse_subjects"],
-                            },
-                            "sort_by": {
-                                "type": ["string", "null"],
-                                "enum": ["gpa", "enrollment", "term", None],
-                            },
-                            "sort_order": {
-                                "type": ["string", "null"],
-                                "enum": ["ASC", "DESC", None],
-                            },
-                            "limit": {
-                                "type": ["integer", "null"],
-                            },
-                            "filters": {
-                                "type": "object",
-                                "properties": {
-                                    # mirror QueryFilters / PlanFilters
-                                    "subjects": {"type": "array", "items": {"type": "string"}},
-                                    "course_numbers": {"type": "array", "items": {"type": "string"}},
-                                    "instructors": {"type": "array", "items": {"type": "string"}},
-                                    "terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_title_contains": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_instructors": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_levels": {"type": "array", "items": {"type": "string"}},
-                                    "grade_min": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "grade_min_percent": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "number"},
-                                    },
-                                    "grade_max": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "b_or_above_percent_min": {
-                                        "type": ["number", "null"],
-                                    },
-                                    "grade_compare": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "left": {"type": "string"},
-                                                "right": {"type": "string"},
-                                                "op": {"type": "string"},
-                                            },
-                                            "required": ["left", "right", "op"],
-                                        },
-                                    },
-                                    "course_number_min": {"type": ["integer", "null"]},
-                                    "course_number_max": {"type": ["integer", "null"]},
-                                    "gpa_min": {"type": ["number", "null"]},
-                                    "gpa_max": {"type": ["number", "null"]},
-                                    "credits_min": {"type": ["integer", "null"]},
-                                    "credits_max": {"type": ["integer", "null"]},
-                                    "enrollment_min": {"type": ["integer", "null"]},
-                                    "enrollment_max": {"type": ["integer", "null"]},
-                                },
-                                "required": [],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["intent", "filters"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
         )
 
-        content = resp.output[0].content[0].text
-        data = json.loads(content)
+        # Responses API: resp.output[0].content[0].text
+        first_output = resp.output[0]
+        first_content = first_output.content[0]
+        raw_text = first_content.text
 
-    except Exception:
-        # If anything goes wrong, just signal "no fallback".
+        # Some SDK variants wrap this as {"value": "..."}
+        if isinstance(raw_text, dict) and "value" in raw_text:
+            raw_text = raw_text["value"]
+
+        print("AI raw text (truncated):", str(raw_text)[:400])
+
+        data = json.loads(raw_text)
+
+    except Exception as e:
+        # Any error here means "no AI plan" → fall back to regex
+        print(
+            "AI fallback failed while calling OpenAI or parsing JSON:",
+            repr(e),
+        )
         return None
 
-    # Merge with defaults so we always have all keys
+    # -------- SANITIZE FILTERS FROM AI --------
+    ai_filters = data.get("filters", {}) or {}
+
+    # These should be dicts for PlanFilters; if the model returned null, drop them
+    for key in ("grade_min", "grade_max", "grade_min_percent"):
+        if ai_filters.get(key) is None:
+            ai_filters.pop(key, None)
+
     filters_dict = _empty_filters()
-    filters_dict.update(data.get("filters", {}))
+    filters_dict.update(ai_filters)
+
+    # Fuzzy-normalize instructor names against the DB
+    raw_instructors = filters_dict.get("instructors") or []
+    normalized_instructors = _normalize_instructors(raw_instructors)
+    filters_dict["instructors"] = normalized_instructors
 
     try:
         pf = PlanFilters(**filters_dict)
-    except Exception:
+    except Exception as e:
+        print("AI fallback: could not construct PlanFilters:", repr(e))
         return None
 
     plan = QueryPlan(
@@ -221,6 +264,7 @@ Rules:
         debug={
             "source": "ai_fallback",
             "raw_ai": data,
+            "normalized_instructors": normalized_instructors,
         },
     )
 
@@ -235,4 +279,5 @@ Rules:
     if isinstance(limit, int):
         plan.limit = limit
 
+    print("AI plan:", plan)
     return plan
