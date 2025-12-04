@@ -139,6 +139,10 @@ def ai_fallback_parse_query_to_plan(text: str) -> Optional[QueryPlan]:
     Returns a QueryPlan if parsing works, otherwise None (so you can
     gracefully fall back to normal behavior).
     """
+    if not os.getenv("OPENAI_API_KEY"):
+        log.warning("AI fallback disabled: OPENAI_API_KEY not set")
+        return None
+
     system_prompt = """
 You are a strict JSON API that converts natural language about college
 courses and grade distributions into structured filters.
@@ -202,9 +206,88 @@ Rules:
   use intent="section_filter".
 - Use "browse_subjects" only for very vague queries like "show subjects".
 - Always output valid JSON and nothing else.
-"""
+    """
 
     user_prompt = f'User query:\n"{text}"'
+    json_schema_spec = {
+        "name": "QueryPlanFallback",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["course_lookup", "section_filter", "browse_subjects"],
+                },
+                "sort_by": {
+                    "type": ["string", "null"],
+                    "enum": ["gpa", "enrollment", "term", None],
+                },
+                "sort_order": {
+                    "type": ["string", "null"],
+                    "enum": ["ASC", "DESC", None],
+                },
+                "limit": {
+                    "type": ["integer", "null"],
+                },
+                "filters": {
+                    "type": "object",
+                    "properties": {
+                        # mirror QueryFilters / PlanFilters
+                        "subjects": {"type": "array", "items": {"type": "string"}},
+                        "course_numbers": {"type": "array", "items": {"type": "string"}},
+                        "instructors": {"type": "array", "items": {"type": "string"}},
+                        "terms": {"type": "array", "items": {"type": "string"}},
+                        "course_title_contains": {"type": "array", "items": {"type": "string"}},
+                        "exclude_instructors": {"type": "array", "items": {"type": "string"}},
+                        "exclude_terms": {"type": "array", "items": {"type": "string"}},
+                        "course_levels": {"type": "array", "items": {"type": "string"}},
+                        "grade_min": {
+                            "type": "object",
+                            "additionalProperties": {"type": "integer"},
+                        },
+                        "grade_min_percent": {
+                            "type": "object",
+                            "additionalProperties": {"type": "number"},
+                        },
+                        "grade_max": {
+                            "type": "object",
+                            "additionalProperties": {"type": "integer"},
+                        },
+                        "b_or_above_percent_min": {
+                            "type": ["number", "null"],
+                        },
+                        "grade_compare": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "left": {"type": "string"},
+                                    "right": {"type": "string"},
+                                    "op": {"type": "string"},
+                                },
+                                "required": ["left", "right", "op"],
+                            },
+                        },
+                        "course_number_min": {"type": ["integer", "null"]},
+                        "course_number_max": {"type": ["integer", "null"]},
+                        "gpa_min": {"type": ["number", "null"]},
+                        "gpa_max": {"type": ["number", "null"]},
+                        "credits_min": {"type": ["integer", "null"]},
+                        "credits_max": {"type": ["integer", "null"]},
+                        "enrollment_min": {"type": ["integer", "null"]},
+                        "enrollment_max": {"type": ["integer", "null"]},
+                    },
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["intent", "filters"],
+            "additionalProperties": False,
+        },
+    }
+
+    content: Optional[str] = None
+    transport_used = None
 
     try:
         resp = client.responses.create(
@@ -215,90 +298,45 @@ Rules:
             ],
             response_format={
                 "type": "json_schema",
-                "json_schema": {
-                    "name": "QueryPlanFallback",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {
-                                "type": "string",
-                                "enum": ["course_lookup", "section_filter", "browse_subjects"],
-                            },
-                            "sort_by": {
-                                "type": ["string", "null"],
-                                "enum": ["gpa", "enrollment", "term", None],
-                            },
-                            "sort_order": {
-                                "type": ["string", "null"],
-                                "enum": ["ASC", "DESC", None],
-                            },
-                            "limit": {
-                                "type": ["integer", "null"],
-                            },
-                            "filters": {
-                                "type": "object",
-                                "properties": {
-                                    # mirror QueryFilters / PlanFilters
-                                    "subjects": {"type": "array", "items": {"type": "string"}},
-                                    "course_numbers": {"type": "array", "items": {"type": "string"}},
-                                    "instructors": {"type": "array", "items": {"type": "string"}},
-                                    "terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_title_contains": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_instructors": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_levels": {"type": "array", "items": {"type": "string"}},
-                                    "grade_min": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "grade_min_percent": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "number"},
-                                    },
-                                    "grade_max": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "b_or_above_percent_min": {
-                                        "type": ["number", "null"],
-                                    },
-                                    "grade_compare": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "left": {"type": "string"},
-                                                "right": {"type": "string"},
-                                                "op": {"type": "string"},
-                                            },
-                                            "required": ["left", "right", "op"],
-                                        },
-                                    },
-                                    "course_number_min": {"type": ["integer", "null"]},
-                                    "course_number_max": {"type": ["integer", "null"]},
-                                    "gpa_min": {"type": ["number", "null"]},
-                                    "gpa_max": {"type": ["number", "null"]},
-                                    "credits_min": {"type": ["integer", "null"]},
-                                    "credits_max": {"type": ["integer", "null"]},
-                                    "enrollment_min": {"type": ["integer", "null"]},
-                                    "enrollment_max": {"type": ["integer", "null"]},
-                                },
-                                "required": [],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["intent", "filters"],
-                        "additionalProperties": False,
-                    },
-                },
+                "json_schema": json_schema_spec,
             },
         )
-
         content = resp.output[0].content[0].text
-        data = json.loads(content)
+        transport_used = "responses"
+    except (TypeError, AttributeError) as exc:
+        log.warning(
+            "AI fallback: responses API missing response_format support, falling back to chat.completions: %s",
+            exc,
+        )
+    except Exception as exc:
+        log.warning("AI fallback: OpenAI request failed via responses API: %s", exc)
 
-    except Exception:
-        # If anything goes wrong, just signal "no fallback".
+    if content is None:
+        try:
+            chat_resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": json_schema_spec,
+                },
+            )
+            content = chat_resp.choices[0].message.content
+            transport_used = "chat.completions"
+        except Exception as exc:
+            log.warning("AI fallback: OpenAI request failed via chat.completions: %s", exc)
+            return None
+
+    if not content:
+        return None
+
+    try:
+        data = json.loads(content)
+    except Exception as exc:
+        log.warning("AI fallback: model returned non-JSON content: %s", exc)
         return None
 
     #  SANITIZE FILTERS FROM AI 
@@ -310,12 +348,16 @@ Rules:
             ai_filters.pop(key, None)
 
     filters_dict = _empty_filters()
-    filters_dict.update(data.get("filters", {}))
+    filters_dict.update(ai_filters)
 
     try:
         pf = PlanFilters(**filters_dict)
-    except Exception:
+    except Exception as exc:
+        log.warning("AI fallback: model returned invalid filters: %s", exc)
         return None
+
+    normalized_instructors = _normalize_instructors(pf.instructors)
+    pf.instructors = normalized_instructors
 
     plan = QueryPlan(
         intent=data.get("intent", "section_filter"),
@@ -325,6 +367,7 @@ Rules:
             "source": "ai_fallback",
             "raw_ai": data,
             "normalized_instructors": normalized_instructors,
+            "transport_used": transport_used,
         },
     )
 
