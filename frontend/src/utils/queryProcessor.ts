@@ -145,13 +145,13 @@ export interface ProcessedQueryResponse {
   meta: QueryMeta;
 }
 
-export async function processQuery(query: string): Promise<ProcessedQueryResponse> {
+export async function processQuery(query: string, parserMode: "regex" | "ai" = "regex"): Promise<ProcessedQueryResponse> {
   const response = await fetch(`${API_BASE_URL}/query`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, parser_mode: parserMode }),
   });
 
   if (!response.ok) {

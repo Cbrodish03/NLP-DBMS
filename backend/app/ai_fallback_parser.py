@@ -2,11 +2,13 @@ import json
 import os
 from typing import Optional, Any, Dict
 
+import logging
 from openai import OpenAI  # pip install openai>=1.0.0
 
 from .query_plan import QueryPlan, PlanFilters
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+log = logging.getLogger(__name__)
 
 
 def _empty_filters() -> Dict[str, Any]:
@@ -111,107 +113,39 @@ Rules:
     user_prompt = f'User query:\n"{text}"'
 
     try:
-        resp = client.responses.create(
-            model="gpt-4.1-mini",
-            input=[
+        # Use chat completion with JSON output; more widely supported in the OpenAI SDK.
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "QueryPlanFallback",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {
-                                "type": "string",
-                                "enum": ["course_lookup", "section_filter", "browse_subjects"],
-                            },
-                            "sort_by": {
-                                "type": ["string", "null"],
-                                "enum": ["gpa", "enrollment", "term", None],
-                            },
-                            "sort_order": {
-                                "type": ["string", "null"],
-                                "enum": ["ASC", "DESC", None],
-                            },
-                            "limit": {
-                                "type": ["integer", "null"],
-                            },
-                            "filters": {
-                                "type": "object",
-                                "properties": {
-                                    # mirror QueryFilters / PlanFilters
-                                    "subjects": {"type": "array", "items": {"type": "string"}},
-                                    "course_numbers": {"type": "array", "items": {"type": "string"}},
-                                    "instructors": {"type": "array", "items": {"type": "string"}},
-                                    "terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_title_contains": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_instructors": {"type": "array", "items": {"type": "string"}},
-                                    "exclude_terms": {"type": "array", "items": {"type": "string"}},
-                                    "course_levels": {"type": "array", "items": {"type": "string"}},
-                                    "grade_min": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "grade_min_percent": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "number"},
-                                    },
-                                    "grade_max": {
-                                        "type": "object",
-                                        "additionalProperties": {"type": "integer"},
-                                    },
-                                    "b_or_above_percent_min": {
-                                        "type": ["number", "null"],
-                                    },
-                                    "grade_compare": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "left": {"type": "string"},
-                                                "right": {"type": "string"},
-                                                "op": {"type": "string"},
-                                            },
-                                            "required": ["left", "right", "op"],
-                                        },
-                                    },
-                                    "course_number_min": {"type": ["integer", "null"]},
-                                    "course_number_max": {"type": ["integer", "null"]},
-                                    "gpa_min": {"type": ["number", "null"]},
-                                    "gpa_max": {"type": ["number", "null"]},
-                                    "credits_min": {"type": ["integer", "null"]},
-                                    "credits_max": {"type": ["integer", "null"]},
-                                    "enrollment_min": {"type": ["integer", "null"]},
-                                    "enrollment_max": {"type": ["integer", "null"]},
-                                },
-                                "required": [],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "required": ["intent", "filters"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
+            response_format={"type": "json_object"},
         )
 
-        content = resp.output[0].content[0].text
+        content = resp.choices[0].message.content
+        if not content:
+            log.warning("AI fallback: empty content for text=%r", text)
+            return None
         data = json.loads(content)
 
-    except Exception:
-        # If anything goes wrong, just signal "no fallback".
+    except Exception as exc:
+        # Log and signal "no fallback" so we fall back to regex.
+        log.exception("AI fallback: OpenAI response/parsing failed for text=%r", text)
         return None
 
     # Merge with defaults so we always have all keys
     filters_dict = _empty_filters()
-    filters_dict.update(data.get("filters", {}))
+    # Merge filters but ignore None so defaults stay valid types.
+    for key, val in (data.get("filters") or {}).items():
+        if val is None:
+            continue
+        filters_dict[key] = val
 
     try:
         pf = PlanFilters(**filters_dict)
     except Exception:
+        log.exception("AI fallback: PlanFilters validation failed for text=%r", text)
         return None
 
     plan = QueryPlan(
