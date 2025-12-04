@@ -1,4 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+// In production we route through ingress at /api; override with VITE_API_BASE_URL for local dev.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 type GradeBreakdown = Record<string, number | null | undefined>;
 

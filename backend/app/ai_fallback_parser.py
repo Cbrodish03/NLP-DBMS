@@ -3,12 +3,14 @@ import os
 import difflib
 from typing import Optional, Any, Dict, List
 
+import logging
 from openai import OpenAI  # pip install openai>=1.0.0
 
 from .query_plan import QueryPlan, PlanFilters
 from .db import get_db_conn
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+log = logging.getLogger(__name__)
 
 
 def _empty_filters() -> Dict[str, Any]:
@@ -205,37 +207,101 @@ Rules:
     user_prompt = f'User query:\n"{text}"'
 
     try:
-        print(f"AI fallback: calling OpenAI for query: {text}")
         resp = client.responses.create(
             model="gpt-4.1-mini",
             input=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "QueryPlanFallback",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {
+                                "type": "string",
+                                "enum": ["course_lookup", "section_filter", "browse_subjects"],
+                            },
+                            "sort_by": {
+                                "type": ["string", "null"],
+                                "enum": ["gpa", "enrollment", "term", None],
+                            },
+                            "sort_order": {
+                                "type": ["string", "null"],
+                                "enum": ["ASC", "DESC", None],
+                            },
+                            "limit": {
+                                "type": ["integer", "null"],
+                            },
+                            "filters": {
+                                "type": "object",
+                                "properties": {
+                                    # mirror QueryFilters / PlanFilters
+                                    "subjects": {"type": "array", "items": {"type": "string"}},
+                                    "course_numbers": {"type": "array", "items": {"type": "string"}},
+                                    "instructors": {"type": "array", "items": {"type": "string"}},
+                                    "terms": {"type": "array", "items": {"type": "string"}},
+                                    "course_title_contains": {"type": "array", "items": {"type": "string"}},
+                                    "exclude_instructors": {"type": "array", "items": {"type": "string"}},
+                                    "exclude_terms": {"type": "array", "items": {"type": "string"}},
+                                    "course_levels": {"type": "array", "items": {"type": "string"}},
+                                    "grade_min": {
+                                        "type": "object",
+                                        "additionalProperties": {"type": "integer"},
+                                    },
+                                    "grade_min_percent": {
+                                        "type": "object",
+                                        "additionalProperties": {"type": "number"},
+                                    },
+                                    "grade_max": {
+                                        "type": "object",
+                                        "additionalProperties": {"type": "integer"},
+                                    },
+                                    "b_or_above_percent_min": {
+                                        "type": ["number", "null"],
+                                    },
+                                    "grade_compare": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "left": {"type": "string"},
+                                                "right": {"type": "string"},
+                                                "op": {"type": "string"},
+                                            },
+                                            "required": ["left", "right", "op"],
+                                        },
+                                    },
+                                    "course_number_min": {"type": ["integer", "null"]},
+                                    "course_number_max": {"type": ["integer", "null"]},
+                                    "gpa_min": {"type": ["number", "null"]},
+                                    "gpa_max": {"type": ["number", "null"]},
+                                    "credits_min": {"type": ["integer", "null"]},
+                                    "credits_max": {"type": ["integer", "null"]},
+                                    "enrollment_min": {"type": ["integer", "null"]},
+                                    "enrollment_max": {"type": ["integer", "null"]},
+                                },
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["intent", "filters"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         )
 
-        # Responses API: resp.output[0].content[0].text
-        first_output = resp.output[0]
-        first_content = first_output.content[0]
-        raw_text = first_content.text
+        content = resp.output[0].content[0].text
+        data = json.loads(content)
 
-        # Some SDK variants wrap this as {"value": "..."}
-        if isinstance(raw_text, dict) and "value" in raw_text:
-            raw_text = raw_text["value"]
-
-        print("AI raw text (truncated):", str(raw_text)[:400])
-
-        data = json.loads(raw_text)
-
-    except Exception as e:
-        # Any error here means "no AI plan" → fall back to regex
-        print(
-            "AI fallback failed while calling OpenAI or parsing JSON:",
-            repr(e),
-        )
+    except Exception:
+        # If anything goes wrong, just signal "no fallback".
         return None
 
-    # -------- SANITIZE FILTERS FROM AI --------
+    #  SANITIZE FILTERS FROM AI 
     ai_filters = data.get("filters", {}) or {}
 
     # These should be dicts for PlanFilters; if the model returned null, drop them
@@ -244,17 +310,11 @@ Rules:
             ai_filters.pop(key, None)
 
     filters_dict = _empty_filters()
-    filters_dict.update(ai_filters)
-
-    # Fuzzy-normalize instructor names against the DB
-    raw_instructors = filters_dict.get("instructors") or []
-    normalized_instructors = _normalize_instructors(raw_instructors)
-    filters_dict["instructors"] = normalized_instructors
+    filters_dict.update(data.get("filters", {}))
 
     try:
         pf = PlanFilters(**filters_dict)
-    except Exception as e:
-        print("AI fallback: could not construct PlanFilters:", repr(e))
+    except Exception:
         return None
 
     plan = QueryPlan(

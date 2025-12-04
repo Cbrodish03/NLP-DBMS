@@ -20,6 +20,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -28,6 +30,7 @@ app.add_middleware(
 
 
 @app.get("/healthz")
+@app.get("/api/healthz")
 def health():
     try:
         conn = get_db_conn()
@@ -44,6 +47,7 @@ def health():
 
 
 @app.post("/query", response_model=QueryResponse)
+@app.post("/api/query", response_model=QueryResponse)
 def query_endpoint(req: QueryRequest):
     """
     Explicit parser selection:
